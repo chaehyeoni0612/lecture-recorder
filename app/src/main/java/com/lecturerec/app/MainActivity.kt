@@ -3,32 +3,38 @@ package com.lecturerec.app
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
+import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.Gravity
+import android.view.Menu
+import android.view.MenuItem
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
-import android.widget.ArrayAdapter
-import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.PopupMenu
 import android.widget.ScrollView
-import android.widget.Spinner
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import java.io.File
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var subjectSpinner: Spinner
+    private lateinit var subjectBtn: MaterialButton
     private lateinit var timerText: TextView
-    private lateinit var recBtn: Button
+    private lateinit var recBtn: MaterialButton
     private lateinit var listBox: LinearLayout
+    private var subject: String = "강의"
+    private var defaultRecTint: ColorStateList? = null
     private val handler = Handler(Looper.getMainLooper())
     private var lastListSignature = ""
 
@@ -48,46 +54,47 @@ class MainActivity : AppCompatActivity() {
     private val permLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
 
-    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+    private fun dp(v: Int) = Ui.dp(this, v)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Notif.ensureChannels(this)
+        title = "강의녹음"
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(12), dp(16), dp(12))
+            setPadding(dp(16), dp(8), dp(16), 0)
         }
 
-        val subjRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        subjRow.addView(TextView(this).apply { text = "과목  "; textSize = 16f })
-        subjectSpinner = Spinner(this)
-        subjRow.addView(subjectSpinner, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-        root.addView(subjRow)
+        // 녹음 영역
+        root.addView(Ui.section(this, "과목"))
+        subjectBtn = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            textSize = 14f
+            gravity = Gravity.START or Gravity.CENTER_VERTICAL
+            setAllCaps(false)
+            setOnClickListener { chooseSubject() }
+        }
+        root.addView(subjectBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
         timerText = TextView(this).apply {
             textSize = 40f
             typeface = Typeface.MONOSPACE
+            gravity = Gravity.CENTER
             text = "00:00:00"
-            setPadding(0, dp(16), 0, dp(8))
+            setPadding(0, dp(20), 0, dp(12))
         }
-        root.addView(timerText)
+        root.addView(timerText, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
-        recBtn = Button(this).apply { textSize = 18f }
-        recBtn.setOnClickListener { onRecClick() }
-        root.addView(recBtn, LinearLayout.LayoutParams(MATCH_PARENT, dp(64)))
-
-        val settingsBtn = Button(this).apply { text = "설정" }
-        settingsBtn.setOnClickListener { startActivity(Intent(this, SettingsActivity::class.java)) }
-        root.addView(settingsBtn)
-
-        root.addView(TextView(this).apply {
-            text = "녹음 목록"
+        recBtn = MaterialButton(this).apply {
             textSize = 16f
-            setTypeface(typeface, Typeface.BOLD)
-            setPadding(0, dp(16), 0, dp(4))
-        })
+            setOnClickListener { onRecClick() }
+        }
+        defaultRecTint = recBtn.backgroundTintList
+        root.addView(recBtn, LinearLayout.LayoutParams(MATCH_PARENT, dp(56)))
 
+        // 목록 영역
+        root.addView(Ui.section(this, "녹음 목록").apply { setPadding(0, dp(28), 0, dp(6)) })
+        root.addView(Ui.divider(this))
         listBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val scroll = ScrollView(this)
         scroll.addView(listBox)
@@ -97,9 +104,23 @@ class MainActivity : AppCompatActivity() {
         askPermissions()
     }
 
+    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        menu.add(0, 1, 0, "설정").setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+        return true
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        if (item.itemId == 1) {
+            startActivity(Intent(this, SettingsActivity::class.java))
+            return true
+        }
+        return super.onOptionsItemSelected(item)
+    }
+
     override fun onResume() {
         super.onResume()
-        loadSubjects()
+        subject = Prefs.defaultSubject(this) ?: Prefs.subjects(this).firstOrNull() ?: "강의"
+        subjectBtn.text = subject
         handler.post(ticker)
         refreshList(true)
         handler.postDelayed(refresher, 3000)
@@ -120,13 +141,17 @@ class MainActivity : AppCompatActivity() {
         if (missing.isNotEmpty()) permLauncher.launch(missing.toTypedArray())
     }
 
-    private fun loadSubjects() {
+    private fun chooseSubject() {
         val subjects = Prefs.subjects(this).ifEmpty { listOf("강의") }
-        subjectSpinner.adapter =
-            ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, subjects)
-        val def = Prefs.defaultSubject(this)
-        val idx = if (def != null) subjects.indexOf(def) else -1
-        if (idx >= 0) subjectSpinner.setSelection(idx)
+        val cur = subjects.indexOf(subject)
+        MaterialAlertDialogBuilder(this)
+            .setTitle("과목")
+            .setSingleChoiceItems(subjects.toTypedArray(), cur) { d, which ->
+                subject = subjects[which]
+                subjectBtn.text = subject
+                d.dismiss()
+            }
+            .show()
     }
 
     private fun onRecClick() {
@@ -139,7 +164,6 @@ class MainActivity : AppCompatActivity() {
                 askPermissions()
                 return
             }
-            val subject = subjectSpinner.selectedItem?.toString() ?: "강의"
             RecordService.start(this, subject)
         }
         handler.postDelayed({
@@ -151,7 +175,9 @@ class MainActivity : AppCompatActivity() {
     private fun updateRecUi() {
         val recording = RecordService.currentBase != null
         recBtn.text = if (recording) "녹음 정지" else "녹음 시작"
-        subjectSpinner.isEnabled = !recording
+        recBtn.backgroundTintList =
+            if (recording) ColorStateList.valueOf(Color.parseColor("#C0392B")) else defaultRecTint
+        subjectBtn.isEnabled = !recording
         if (recording) {
             val s = (System.currentTimeMillis() - RecordService.startedAt) / 1000
             timerText.text = "%02d:%02d:%02d".format(s / 3600, (s / 60) % 60, s % 60)
@@ -170,6 +196,13 @@ class MainActivity : AppCompatActivity() {
         else -> "녹음됨"
     }
 
+    private fun statusColor(s: String): Int? = when (s) {
+        "done" -> Color.parseColor("#4E8A5C")
+        "failed" -> Color.parseColor("#C0392B")
+        "recording", "transcribing", "queued", "waiting" -> Color.parseColor("#B8862B")
+        else -> null
+    }
+
     private fun refreshList(force: Boolean) {
         val bases = Store.list(this)
         val states = bases.map { Store.readState(this, it) }
@@ -179,43 +212,56 @@ class MainActivity : AppCompatActivity() {
 
         listBox.removeAllViews()
         if (bases.isEmpty()) {
-            listBox.addView(TextView(this).apply { text = "아직 녹음이 없습니다." })
+            listBox.addView(Ui.sub(this, "아직 녹음이 없습니다.").apply { setPadding(0, dp(12), 0, 0) })
             return
         }
         for ((base, st) in bases.zip(states)) {
             val row = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
                 setPadding(0, dp(10), 0, dp(10))
             }
-            row.addView(TextView(this).apply {
-                text = base
-                textSize = 15f
-                setTypeface(typeface, Typeface.BOLD)
+            val texts = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            texts.addView(Ui.body(this, base))
+            val statusLine = statusLabel(st.status) + if (st.msg.isNotEmpty()) " · ${st.msg}" else ""
+            texts.addView(Ui.sub(this, statusLine).apply {
+                val col = statusColor(st.status)
+                if (col != null) post { setTextColor(col) }
             })
-            row.addView(TextView(this).apply {
-                text = statusLabel(st.status) + if (st.msg.isNotEmpty()) " · ${st.msg}" else ""
-                textSize = 13f
-            })
+            row.addView(texts, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
 
             if (st.status != "recording") {
-                val btns = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-                fun add(label: String, enabled: Boolean = true, action: () -> Unit) {
-                    val b = Button(this).apply {
-                        text = label
-                        textSize = 12f
-                        isEnabled = enabled
-                        setOnClickListener { action() }
-                    }
-                    btns.addView(b, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+                val more = TextView(this).apply {
+                    text = "⋮"
+                    textSize = 20f
+                    gravity = Gravity.CENTER
+                    setPadding(dp(12), dp(4), dp(4), dp(4))
                 }
-                add("녹음 공유") { share(Store.audio(this, base), "audio/mp4") }
-                add("전사본 공유", Store.txt(this, base).exists()) { share(Store.txt(this, base), "text/plain") }
-                add("다시 전사") { retry(base, st.status) }
-                add("삭제") { confirmDelete(base) }
-                row.addView(btns)
+                more.setOnClickListener { showMenu(more, base, st.status) }
+                row.addView(more, LinearLayout.LayoutParams(dp(40), dp(40)))
+                row.setOnClickListener { showMenu(more, base, st.status) }
             }
             listBox.addView(row)
+            listBox.addView(Ui.divider(this))
         }
+    }
+
+    private fun showMenu(anchor: TextView, base: String, status: String) {
+        val pm = PopupMenu(this, anchor)
+        pm.menu.add(0, 1, 0, "녹음 공유")
+        pm.menu.add(0, 2, 1, "전사본 공유").isEnabled = Store.txt(this, base).exists()
+        pm.menu.add(0, 3, 2, "다시 전사")
+        pm.menu.add(0, 4, 3, "삭제")
+        pm.setOnMenuItemClickListener {
+            when (it.itemId) {
+                1 -> share(Store.audio(this, base), "audio/mp4")
+                2 -> share(Store.txt(this, base), "text/plain")
+                3 -> retry(base, status)
+                4 -> confirmDelete(base)
+            }
+            true
+        }
+        pm.show()
     }
 
     private fun share(f: File, mime: String) {
@@ -230,7 +276,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun retry(base: String, status: String) {
         if (status == "done") {
-            AlertDialog.Builder(this)
+            MaterialAlertDialogBuilder(this)
                 .setMessage("전사본을 지우고 처음부터 다시 전사할까요?")
                 .setPositiveButton("다시 전사") { _, _ ->
                     Store.clearTranscript(this, base)
@@ -249,8 +295,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun confirmDelete(base: String) {
-        AlertDialog.Builder(this)
-            .setMessage("$base\n녹음과 전사본을 이 폰에서 삭제할까요? (드라이브에 올린 파일은 그대로 남습니다)")
+        MaterialAlertDialogBuilder(this)
+            .setTitle("삭제")
+            .setMessage("$base\n\n녹음과 전사본을 이 폰에서 삭제합니다. 드라이브에 올린 파일은 남습니다.")
             .setPositiveButton("삭제") { _, _ ->
                 TranscribeWorker.cancel(this, base)
                 Store.delete(this, base)
