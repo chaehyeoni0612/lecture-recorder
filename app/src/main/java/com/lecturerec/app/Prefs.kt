@@ -14,6 +14,7 @@ object Prefs {
 
     private fun sp(c: Context) = c.getSharedPreferences("settings", Context.MODE_PRIVATE)
 
+    fun groqKey(c: Context): String = (sp(c).getString("groq_key", "") ?: "").trim()
     fun apiKey(c: Context): String = (sp(c).getString("api_key", "") ?: "").trim()
     fun modelsText(c: Context): String = sp(c).getString("models", DEFAULT_MODELS) ?: DEFAULT_MODELS
     fun scheduleText(c: Context): String = sp(c).getString("schedule", DEFAULT_SCHEDULE) ?: DEFAULT_SCHEDULE
@@ -37,8 +38,9 @@ object Prefs {
     fun defaultSubject(c: Context, today: LocalDate = LocalDate.now()): String? =
         schedule(c).firstOrNull { !today.isBefore(it.start) && !today.isAfter(it.end) }?.subject
 
-    fun save(c: Context, key: String, models: String, schedule: String) {
+    fun save(c: Context, groqKey: String, key: String, models: String, schedule: String) {
         sp(c).edit()
+            .putString("groq_key", groqKey.trim())
             .putString("api_key", key.trim())
             .putString("models", models.trim())
             .putString("schedule", schedule.trim())

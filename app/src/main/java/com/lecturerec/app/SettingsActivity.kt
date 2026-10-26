@@ -24,6 +24,7 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var modelBox: LinearLayout
     private lateinit var schedBox: LinearLayout
     private lateinit var keyEdit: TextInputEditText
+    private lateinit var groqEdit: TextInputEditText
 
     private fun dp(v: Int) = Ui.dp(this, v)
 
@@ -59,20 +60,32 @@ class SettingsActivity : AppCompatActivity() {
             setPadding(dp(16), dp(4), dp(16), dp(16))
         }
 
-        // API 키
-        box.addView(Ui.section(this, "Gemini API 키"))
+        // Groq 키
+        box.addView(Ui.section(this, "Groq API 키 (기본 전사 엔진)"))
+        val (groqLayout, ge) = outlinedField("API 키")
+        groqEdit = ge
+        groqLayout.endIconMode = TextInputLayout.END_ICON_PASSWORD_TOGGLE
+        groqEdit.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        groqEdit.setText(Prefs.groqKey(this))
+        box.addView(groqLayout)
+        box.addView(Ui.sub(this, "console.groq.com 에서 발급. Whisper large-v3로 전사합니다.").apply {
+            setPadding(dp(4), dp(4), 0, 0)
+        })
+
+        // Gemini 키
+        box.addView(Ui.section(this, "Gemini API 키 (예비)"))
         val (keyLayout, ke) = outlinedField("API 키")
         keyEdit = ke
         keyLayout.endIconMode = TextInputLayout.END_ICON_PASSWORD_TOGGLE
         keyEdit.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         keyEdit.setText(Prefs.apiKey(this))
         box.addView(keyLayout)
-        box.addView(Ui.sub(this, "aistudio.google.com 에서 발급. 이 폰에만 저장됩니다.").apply {
+        box.addView(Ui.sub(this, "aistudio.google.com 에서 발급. Groq가 막히거나 누락이 의심될 때만 씁니다. 키는 이 폰에만 저장됩니다.").apply {
             setPadding(dp(4), dp(4), 0, 0)
         })
 
         // 모델
-        box.addView(Ui.section(this, "전사 모델"))
+        box.addView(Ui.section(this, "Gemini 모델"))
         box.addView(Ui.sub(this, "위에서부터 사용. 바쁘면 다음 모델로, 전부 바쁘면 기다렸다가 다시 시도합니다.").apply {
             setPadding(0, 0, 0, dp(6))
         })
@@ -118,7 +131,7 @@ class SettingsActivity : AppCompatActivity() {
     private fun save() {
         val modelsText = models.joinToString("\n")
         val schedText = schedule.joinToString("\n") { "${it.subject},${it.start},${it.end}" }
-        Prefs.save(this, keyEdit.text?.toString() ?: "", modelsText, schedText)
+        Prefs.save(this, groqEdit.text?.toString() ?: "", keyEdit.text?.toString() ?: "", modelsText, schedText)
         Toast.makeText(this, "저장했습니다", Toast.LENGTH_SHORT).show()
         finish()
     }

@@ -86,14 +86,11 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         val audio = Store.audio(c, base)
         if (!audio.exists()) return Result.failure()
 
+        val groqKey = Prefs.groqKey(c)
         val key = Prefs.apiKey(c)
-        if (key.isEmpty()) {
-            Store.writeState(c, base, "failed", "설정에서 API 키를 넣은 뒤 다시 전사를 눌러 주세요")
-            return Result.failure()
-        }
         val models = Prefs.models(c)
-        if (models.isEmpty()) {
-            Store.writeState(c, base, "failed", "설정에 모델이 없습니다")
+        if (groqKey.isEmpty() && (key.isEmpty() || models.isEmpty())) {
+            Store.writeState(c, base, "failed", "설정에서 Groq API 키를 넣은 뒤 다시 전사를 눌러 주세요")
             return Result.failure()
         }
 
@@ -115,10 +112,10 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
             progress = "${ch.index + 1}/${chunks.size} 조각"
             Store.writeState(c, base, "transcribing", progress)
             try {
-                val ev = transcribeChunk(audio, ch, key, models, speech, parts)
+                val ev = transcribeChunk(audio, ch, groqKey, key, models, speech, parts)
                 pf.writeText(toJson(ev).toString())
             } catch (e: AllBusy) {
-                Store.writeState(c, base, "waiting", "모델이 모두 바쁨, 자동 재시도 예정 · ${e.message}")
+                Store.writeState(c, base, "waiting", "엔진이 모두 바쁨, 자동 재시도 예정 · ${e.message}")
                 return Result.retry()
             } catch (e: FatalApi) {
                 Store.writeState(c, base, "failed", e.message ?: "API 오류")
@@ -137,29 +134,76 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         return Result.success()
     }
 
-    /** 한 조각: 최대 3번 시도. 누락 의심이 없으면 바로 채택, 계속 의심이면 가장 긴 결과를 채택. */
+    /**
+     * 한 조각: Groq Whisper로 먼저 전사. Groq가 막혔거나 누락 의심이면 Gemini로 시도.
+     * 누락 의심이 없으면 바로 채택, 계속 의심이면 가장 긴 결과를 채택.
+     */
     private suspend fun transcribeChunk(
-        audio: File, ch: Chunk, key: String, models: List<String>, speech: Speech, parts: File
+        audio: File, ch: Chunk, groqKey: String, gemKey: String, models: List<String>, speech: Speech, parts: File
     ): Eval {
         val tmp = File(parts, "chunk_%02d.m4a".format(ch.index))
         val actualStart = withContext(Dispatchers.IO) { Splitter.extract(audio, ch.sendStart, ch.sendEnd, tmp) }
         val bytes = tmp.readBytes()
-        val prompt = Gemini.prompt((ch.sendEnd - ch.sendStart) / 60000.0)
         var best: Eval? = null
+        var busy: AllBusy? = null
         try {
-            for (attempt in 0 until 3) {
-                val k = attempt % models.size
-                val order = models.drop(k) + models.take(k)
-                val (model, r) = call(key, order, bytes, prompt)
-                val lines = parse(r.text, actualStart).filter { it.t >= ch.coreStart - 2000 && it.t < ch.coreEnd }
-                val ev = evaluate(lines, ch, speech, r.truncated, model)
-                if (!ev.suspect) return ev
-                if (best == null || ev.chars > best.chars) best = ev
+            if (groqKey.isNotEmpty()) {
+                try {
+                    val segs = callGroq(groqKey, bytes)
+                    val lines = segs.map { Line(actualStart + (it.start * 1000).toLong(), it.text) }
+                        .filter { it.t >= ch.coreStart - 2000 && it.t < ch.coreEnd }
+                    val ev = evaluate(lines, ch, speech, false, Groq.MODEL)
+                    if (!ev.suspect) return ev
+                    best = ev
+                } catch (e: AllBusy) {
+                    busy = e
+                }
+            }
+            if (gemKey.isNotEmpty() && models.isNotEmpty()) {
+                val prompt = Gemini.prompt((ch.sendEnd - ch.sendStart) / 60000.0)
+                val tries = if (best == null) 3 else 1
+                for (attempt in 0 until tries) {
+                    val k = attempt % models.size
+                    val order = models.drop(k) + models.take(k)
+                    val pair = try {
+                        call(gemKey, order, bytes, prompt)
+                    } catch (e: AllBusy) {
+                        if (best != null) return best
+                        throw e
+                    }
+                    val lines = parse(pair.second.text, actualStart).filter { it.t >= ch.coreStart - 2000 && it.t < ch.coreEnd }
+                    val ev = evaluate(lines, ch, speech, pair.second.truncated, pair.first)
+                    if (!ev.suspect) return ev
+                    val cur = best
+                    if (cur == null || ev.chars > cur.chars) best = ev
+                }
             }
         } finally {
             tmp.delete()
         }
-        return best!!
+        return best ?: throw (busy ?: AllBusy("사용할 수 있는 엔진이 없습니다"))
+    }
+
+    /** Groq: 바쁘면 대기 후 3번까지 재시도, 그래도 안 되면 AllBusy (→ Gemini로 넘어감) */
+    private suspend fun callGroq(key: String, bytes: ByteArray): List<Groq.Seg> {
+        val waits = longArrayOf(5_000, 20_000, 60_000)
+        var lastErr = ""
+        var a = 0
+        while (true) {
+            try {
+                status("Groq Whisper 요청 중")
+                return withContext(Dispatchers.IO) { Groq.transcribe(key, bytes, "의과대학 강의입니다. 의학 용어는 영어로 적습니다.") }
+            } catch (e: ApiException) {
+                lastErr = "Groq ${e.code}: ${e.message}"
+                if (e.code == 400 || e.code == 401 || e.code == 403) throw FatalApi("Groq API 오류 ${e.code}: ${e.message}")
+            } catch (e: IOException) {
+                lastErr = "Groq 네트워크: ${e.message}"
+            }
+            if (a >= waits.size) throw AllBusy(lastErr.take(120))
+            status("${lastErr.take(60)} · ${waits[a] / 1000}초 후 재시도")
+            delay(waits[a])
+            a++
+        }
     }
 
     /** 허용된 모델만 순서대로. 모델마다 대기 후 재시도 3번. 전부 막히면 AllBusy. */
