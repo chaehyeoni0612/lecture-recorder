@@ -1,6 +1,8 @@
 package com.lecturerec.app
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
@@ -308,13 +310,17 @@ class MainActivity : AppCompatActivity() {
     private fun showMenu(anchor: TextView, base: String, status: String) {
         val pm = PopupMenu(this, anchor)
         pm.menu.add(0, 1, 0, "녹음 공유")
-        pm.menu.add(0, 2, 1, "전사본 공유").isEnabled = Store.txt(this, base).exists()
+        val hasTxt = Store.txt(this, base).exists()
+        pm.menu.add(0, 2, 1, "전사본 공유 (파일)").isEnabled = hasTxt
+        pm.menu.add(0, 5, 1, "전사본 복사").isEnabled = hasTxt
         pm.menu.add(0, 3, 2, "다시 전사")
         pm.menu.add(0, 4, 3, "삭제")
         pm.setOnMenuItemClickListener {
             when (it.itemId) {
                 1 -> share(Store.audio(this, base), "audio/mp4")
-                2 -> share(Store.txt(this, base), "text/plain")
+                // text/plain으로 보내면 카톡 등이 파일이 아닌 "글"로 받으려다 실패함 → 일반 파일로 보냄
+                2 -> share(Store.txt(this, base), "application/octet-stream")
+                5 -> copyText(Store.txt(this, base))
                 3 -> retry(base, status)
                 4 -> confirmDelete(base)
             }
@@ -329,8 +335,17 @@ class MainActivity : AppCompatActivity() {
         val i = Intent(Intent.ACTION_SEND)
             .setType(mime)
             .putExtra(Intent.EXTRA_STREAM, uri)
+            .putExtra(Intent.EXTRA_TITLE, f.name)
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        startActivity(Intent.createChooser(i, "드라이브에 올리기"))
+        i.clipData = ClipData.newRawUri(f.name, uri)
+        startActivity(Intent.createChooser(i, f.name))
+    }
+
+    private fun copyText(f: File) {
+        if (!f.exists()) return
+        val cm = getSystemService(ClipboardManager::class.java)
+        cm.setPrimaryClip(ClipData.newPlainText(f.name, f.readText()))
+        Toast.makeText(this, "전사본을 복사했습니다", Toast.LENGTH_SHORT).show()
     }
 
     private fun retry(base: String, status: String) {
