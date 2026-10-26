@@ -56,7 +56,8 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         val model: String,
         val gaps: List<Pair<Long, Long>>,
         val lowRate: Boolean,
-        val truncated: Boolean
+        val truncated: Boolean,
+        val note: String = ""
     ) {
         val chars: Int get() = lines.sumOf { it.text.length }
         val suspect: Boolean get() = gaps.isNotEmpty() || lowRate || truncated
@@ -152,6 +153,14 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
      * 한 조각: Groq Whisper로 먼저 전사. Groq가 막혔거나 누락 의심이면 Gemini로 시도.
      * 누락 의심이 없으면 바로 채택, 계속 의심이면 가장 긴 결과를 채택.
      */
+    private fun describe(ev: Eval): String {
+        val p = mutableListOf<String>()
+        ev.gaps.forEach { p.add(fmt(it.first) + "–" + fmt(it.second) + " 공백") }
+        if (ev.lowRate) p.add("분량 부족")
+        if (ev.truncated) p.add("잘림")
+        return p.joinToString(", ")
+    }
+
     private suspend fun transcribeChunk(
         audio: File, ch: Chunk, groqKey: String, gemKey: String, models: List<String>, speech: Speech, parts: File
     ): Eval {
@@ -160,18 +169,22 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         val bytes = tmp.readBytes()
         var best: Eval? = null
         var busy: AllBusy? = null
+        var note = if (groqKey.isEmpty()) "Groq 키 없음 → Gemini" else ""
         try {
             if (groqKey.isNotEmpty()) {
                 try {
                     val segs = callGroq(groqKey, bytes)
                     val lines = segs.map { Line(actualStart + (it.start * 1000).toLong(), it.text) }
-                        .filter { it.t >= ch.coreStart - 2000 && it.t < ch.coreEnd }
+                        .filter { it.t >= ch.sendStart - 2000 && it.t < ch.sendEnd + 2000 }
                     val ev = evaluate(lines, ch, speech, false, Groq.MODEL)
                     if (!ev.suspect) return ev
                     best = ev
+                    note = "Groq 결과 누락 의심(${describe(ev)}) → Gemini로 확인"
                 } catch (e: AllBusy) {
                     busy = e
+                    note = "Groq 막힘(${e.message?.take(60)}) → Gemini"
                 }
+                if (note.isNotEmpty() && gemKey.isNotEmpty()) status(note)
             }
             if (gemKey.isNotEmpty() && models.isNotEmpty()) {
                 val prompt = Gemini.prompt((ch.sendEnd - ch.sendStart) / 60000.0)
@@ -182,12 +195,13 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
                     val pair = try {
                         call(gemKey, order, bytes, prompt)
                     } catch (e: AllBusy) {
-                        if (best != null) return best
+                        val cur = best
+                        if (cur != null) return cur.copy(note = "$note · Gemini도 막혀 ${cur.model} 결과 사용")
                         throw e
                     }
-                    val lines = parse(pair.second.text, actualStart).filter { it.t >= ch.coreStart - 2000 && it.t < ch.coreEnd }
+                    val lines = parse(pair.second.text, actualStart).filter { it.t >= ch.sendStart - 2000 && it.t < ch.sendEnd + 2000 }
                     val ev = evaluate(lines, ch, speech, pair.second.truncated, pair.first)
-                    if (!ev.suspect) return ev
+                    if (!ev.suspect) return ev.copy(note = note)
                     val cur = best
                     if (cur == null || ev.chars > cur.chars) best = ev
                 }
@@ -195,7 +209,8 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         } finally {
             tmp.delete()
         }
-        return best ?: throw (busy ?: AllBusy("사용할 수 있는 엔진이 없습니다"))
+        val fin = best ?: throw (busy ?: AllBusy("사용할 수 있는 엔진이 없습니다"))
+        return fin.copy(note = if (note.isEmpty()) "" else "$note · 더 많이 받아 적은 ${fin.model} 결과 사용")
     }
 
     /** Groq: 바쁘면 대기 후 3번까지 재시도, 그래도 안 되면 AllBusy (→ Gemini로 넘어감) */
@@ -277,7 +292,8 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         return out
     }
 
-    private fun evaluate(lines: List<Line>, ch: Chunk, speech: Speech, truncated: Boolean, model: String): Eval {
+    private fun evaluate(all: List<Line>, ch: Chunk, speech: Speech, truncated: Boolean, model: String): Eval {
+        val lines = all.filter { it.t >= ch.coreStart - 2000 && it.t < ch.coreEnd }
         val gaps = mutableListOf<Pair<Long, Long>>()
         val ts = listOf(ch.coreStart) + lines.map { it.t }.sorted() + listOf(ch.coreEnd)
         for (i in 0 until ts.size - 1) {
@@ -288,7 +304,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         val speakMin = speech.speakingMs(ch.coreStart, ch.coreEnd) / 60000.0
         val chars = lines.sumOf { it.text.length }
         val low = speakMin > 1.0 && chars < speakMin * 120
-        return Eval(lines, model, gaps, low, truncated)
+        return Eval(all, model, gaps, low, truncated)
     }
 
     private fun toJson(ev: Eval): JSONObject {
@@ -298,6 +314,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         ev.gaps.forEach { gs.put(JSONArray().put(it.first).put(it.second)) }
         return JSONObject()
             .put("model", ev.model)
+            .put("note", ev.note)
             .put("low", ev.lowRate)
             .put("truncated", ev.truncated)
             .put("gaps", gs)
@@ -306,38 +323,59 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
 
     private fun assemble(base: String, dur: Long, chunks: List<Chunk>, parts: File): Pair<String, Int> {
         val body = mutableListOf<Line>()
+        val markers = mutableListOf<Line>()
         val modelCount = linkedMapOf<String, Int>()
+        val notes = mutableListOf<String>()
         var suspects = 0
+        var resume = 0L
         for (ch in chunks) {
             val o = JSONObject(File(parts, "chunk_%02d.json".format(ch.index)).readText())
             val m = o.optString("model")
             modelCount[m] = (modelCount[m] ?: 0) + 1
-            val ls = o.getJSONArray("lines")
-            for (i in 0 until ls.length()) {
-                val a = ls.getJSONArray(i)
-                body.add(Line(a.getLong(0), "[" + fmt(a.getLong(0)) + "] " + a.getString(1)))
+            val note = o.optString("note")
+            if (note.isNotEmpty()) {
+                notes.add("# 조각 ${ch.index + 1} (${fmt(ch.coreStart)}–${fmt(ch.coreEnd)}): $m · $note")
             }
+
+            val ls = o.getJSONArray("lines")
+            val lines = (0 until ls.length()).map { val a = ls.getJSONArray(it); Line(a.getLong(0), a.getString(1)) }
+                .sortedBy { it.t }
+            // 조각 경계 처리: 다음 조각이 이미 들은 구간(다음 조각 시작+1초 이후)의 줄은 다음 조각 것으로 씀.
+            // 이렇게 하면 경계를 걸친 문장이 두 조각에 중복으로 들어가지 않음.
+            val next = chunks.getOrNull(ch.index + 1)
+            val handOff = next?.let { it.sendStart + 1000 } ?: Long.MAX_VALUE
+            val from = resume - 1500
+            var firstDropped = -1L
+            for (ln in lines) {
+                if (ln.t < from || ln.t >= ch.coreEnd) continue
+                if (ln.t >= handOff) {
+                    if (firstDropped < 0) firstDropped = ln.t
+                    continue
+                }
+                body.add(ln)
+            }
+            resume = if (firstDropped >= 0) firstDropped else ch.coreEnd
+
             val gs = o.getJSONArray("gaps")
             for (i in 0 until gs.length()) {
                 val g = gs.getJSONArray(i)
-                body.add(Line(g.getLong(0) + 1, "[누락 의심 " + fmt(g.getLong(0)) + "–" + fmt(g.getLong(1)) + "]"))
+                markers.add(Line(g.getLong(0) + 1, "[누락 의심 " + fmt(g.getLong(0)) + "–" + fmt(g.getLong(1)) + "]"))
                 suspects++
             }
             if (o.optBoolean("low") || o.optBoolean("truncated")) {
-                body.add(
-                    Line(ch.coreStart, "[누락 의심 " + fmt(ch.coreStart) + "–" + fmt(ch.coreEnd) + " · 분량 부족]")
-                )
+                markers.add(Line(ch.coreStart, "[누락 의심 " + fmt(ch.coreStart) + "–" + fmt(ch.coreEnd) + " · 분량 부족]"))
                 suspects++
             }
         }
-        body.sortBy { it.t }
+        val merged = (body.map { Line(it.t, "[" + fmt(it.t) + "] " + it.text) } + markers).sortedBy { it.t }
         val modelsStr = modelCount.entries.joinToString(", ") { "${it.key} ${it.value}조각" }
         val sb = StringBuilder()
         sb.append("# ").append(base).append('\n')
         sb.append("# 녹음 길이 ").append(fmt(dur)).append(" · 전사 모델: ").append(modelsStr).append('\n')
+        notes.forEach { sb.append(it).append('\n') }
         if (suspects > 0) sb.append("# 누락 의심 ").append(suspects).append("곳 (본문에 [누락 의심] 표시)\n")
         sb.append('\n')
-        body.forEach { sb.append(it.text).append('\n') }
+        merged.forEach { sb.append(it.text).append('\n') }
         return sb.toString() to suspects
     }
 }

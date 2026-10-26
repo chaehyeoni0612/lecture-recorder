@@ -8,13 +8,13 @@ import android.media.MediaMuxer
 import java.io.File
 import java.nio.ByteBuffer
 
-/** coreStart~coreEnd: 이 조각이 책임지는 구간. sendStart~sendEnd: 앞뒤 15초 겹쳐서 실제로 보내는 구간. (ms) */
+/** coreStart~coreEnd: 이 조각이 책임지는 구간. sendStart~sendEnd: 앞뒤 30초 겹쳐서 실제로 보내는 구간. (ms) */
 data class Chunk(val index: Int, val coreStart: Long, val coreEnd: Long, val sendStart: Long, val sendEnd: Long)
 
 object Splitter {
     const val STEP = 500L
     private const val TARGET = 10 * 60_000L
-    private const val OVERLAP = 15_000L
+    private const val OVERLAP = 30_000L
     private const val WINDOW = 30_000L
 
     fun readAmps(f: File): IntArray =
