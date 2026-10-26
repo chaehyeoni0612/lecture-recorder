@@ -57,10 +57,11 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         val gaps: List<Pair<Long, Long>>,
         val lowRate: Boolean,
         val truncated: Boolean,
-        val note: String = ""
+        val note: String = "",
+        val repeated: Boolean = false
     ) {
         val chars: Int get() = lines.sumOf { it.text.length }
-        val suspect: Boolean get() = gaps.isNotEmpty() || lowRate || truncated
+        val suspect: Boolean get() = gaps.isNotEmpty() || lowRate || truncated || repeated
     }
 
     override suspend fun getForegroundInfo(): ForegroundInfo {
@@ -105,7 +106,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         val key = Prefs.apiKey(c)
         val models = Prefs.models(c)
         if (groqKey.isEmpty() && (key.isEmpty() || models.isEmpty())) {
-            Store.writeState(c, base, "failed", "설정에서 Groq API 키를 넣은 뒤 다시 전사를 눌러 주세요")
+            Store.writeState(c, base, "failed", "설정에서 Gemini API 키를 넣은 뒤 다시 전사를 눌러 주세요")
             return Result.failure()
         }
 
@@ -184,62 +185,68 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         ev.gaps.forEach { p.add(fmt(it.first) + "–" + fmt(it.second) + " 공백") }
         if (ev.lowRate) p.add("분량 부족")
         if (ev.truncated) p.add("잘림")
+        if (ev.repeated) p.add("같은 문장 반복")
         return p.joinToString(", ")
     }
 
+    /**
+     * 한 조각: Gemini로 먼저 전사(모델 순서대로, 의심이면 다른 모델로 최대 3번).
+     * Gemini가 모두 막혔거나 계속 의심이면 Groq Whisper를 예비로 써 보고, 가장 나은 결과를 고름.
+     */
     private suspend fun transcribeChunk(
         audio: File, ch: Chunk, groqKey: String, gemKey: String, models: List<String>, speech: Speech, parts: File
     ): Eval {
         val tmp = File(parts, "chunk_%02d.m4a".format(ch.index))
         val actualStart = withContext(Dispatchers.IO) { Splitter.extract(audio, ch.sendStart, ch.sendEnd, tmp) }
         val bytes = tmp.readBytes()
-        var best: Eval? = null
+        val found = mutableListOf<Eval>()
         var busy: AllBusy? = null
-        var note = if (groqKey.isEmpty()) "Groq 키 없음 → Gemini" else ""
+        var note = ""
         try {
+            if (gemKey.isNotEmpty() && models.isNotEmpty()) {
+                val prompt = Gemini.prompt((ch.sendEnd - ch.sendStart) / 60000.0)
+                for (attempt in 0 until 3) {
+                    val k = attempt % models.size
+                    val order = models.drop(k) + models.take(k)
+                    try {
+                        val pair = call(gemKey, order, bytes, prompt)
+                        val lines = parse(pair.second.text, actualStart)
+                            .filter { it.t >= ch.sendStart - 2000 && it.t < ch.sendEnd + 2000 }
+                        val ev = evaluate(lines, ch, speech, pair.second.truncated, pair.first)
+                        if (!ev.suspect) return ev
+                        found.add(ev)
+                        note = "Gemini 결과 누락 의심(${describe(ev)})"
+                    } catch (e: AllBusy) {
+                        busy = e
+                        note = "Gemini 막힘(${e.message?.take(60)})"
+                        break
+                    }
+                }
+            } else {
+                note = "Gemini 키 없음"
+            }
             if (groqKey.isNotEmpty()) {
+                status("$note → Groq 예비 사용")
                 try {
                     val segs = callGroq(groqKey, bytes)
                     val lines = segs.map { Line(actualStart + (it.start * 1000).toLong(), it.text) }
                         .filter { it.t >= ch.sendStart - 2000 && it.t < ch.sendEnd + 2000 }
                     val ev = evaluate(lines, ch, speech, false, Groq.MODEL)
-                    if (!ev.suspect) return ev
-                    best = ev
-                    note = "Groq 결과 누락 의심(${describe(ev)}) → Gemini로 확인"
+                    if (!ev.suspect && found.isEmpty()) return ev.copy(note = "$note → Groq")
+                    found.add(ev)
                 } catch (e: AllBusy) {
                     busy = e
-                    note = "Groq 막힘(${e.message?.take(60)}) → Gemini"
-                }
-                if (note.isNotEmpty() && gemKey.isNotEmpty()) status(note)
-            }
-            if (gemKey.isNotEmpty() && models.isNotEmpty()) {
-                val prompt = Gemini.prompt((ch.sendEnd - ch.sendStart) / 60000.0)
-                val tries = if (best == null) 3 else 1
-                for (attempt in 0 until tries) {
-                    val k = attempt % models.size
-                    val order = models.drop(k) + models.take(k)
-                    val pair = try {
-                        call(gemKey, order, bytes, prompt)
-                    } catch (e: AllBusy) {
-                        val cur = best
-                        if (cur != null) return cur.copy(note = "$note · Gemini도 막혀 ${cur.model} 결과 사용")
-                        throw e
-                    }
-                    val lines = parse(pair.second.text, actualStart).filter { it.t >= ch.sendStart - 2000 && it.t < ch.sendEnd + 2000 }
-                    val ev = evaluate(lines, ch, speech, pair.second.truncated, pair.first)
-                    if (!ev.suspect) return ev.copy(note = note)
-                    val cur = best
-                    if (cur == null || ev.chars > cur.chars) best = ev
                 }
             }
         } finally {
             tmp.delete()
         }
-        val fin = best ?: throw (busy ?: AllBusy("사용할 수 있는 엔진이 없습니다"))
-        return fin.copy(note = if (note.isEmpty()) "" else "$note · 더 많이 받아 적은 ${fin.model} 결과 사용")
+        if (found.isEmpty()) throw (busy ?: AllBusy("사용할 수 있는 엔진이 없습니다"))
+        val pick = found.sortedWith(compareBy<Eval>({ it.suspect }, { -it.chars })).first()
+        return pick.copy(note = "$note · 후보 ${found.size}개 중 ${pick.model} 결과 사용")
     }
 
-    /** Groq: 바쁘면 대기 후 3번까지 재시도, 그래도 안 되면 AllBusy (→ Gemini로 넘어감) */
+    /** Groq(예비): 바쁘면 대기 후 3번까지 재시도, 그래도 안 되면 AllBusy */
     private suspend fun callGroq(key: String, bytes: ByteArray): List<Groq.Seg> {
         val waits = longArrayOf(5_000, 20_000, 60_000)
         var lastErr = ""
@@ -247,7 +254,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         while (true) {
             try {
                 status("Groq Whisper 요청 중")
-                return withContext(Dispatchers.IO) { Groq.transcribe(key, bytes, "의과대학 강의입니다. 의학 용어는 영어로 적습니다.") }
+                return withContext(Dispatchers.IO) { Groq.transcribe(key, bytes, "") }
             } catch (e: ApiException) {
                 lastErr = "Groq ${e.code}: ${e.message}"
                 if (e.code == 400 || e.code == 401 || e.code == 403) throw FatalApi("Groq API 오류 ${e.code}: ${e.message}")
@@ -330,7 +337,11 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         val speakMin = speech.speakingMs(ch.coreStart, ch.coreEnd) / 60000.0
         val chars = lines.sumOf { it.text.length }
         val low = speakMin > 1.0 && chars < speakMin * 120
-        return Eval(all, model, gaps, low, truncated)
+        // 같은 문장이 3번 이상 나오면 받아 적지 못한 구간을 헛말로 채운 것으로 봄
+        val rep = lines.map { l -> l.text.lowercase().filter { it.isLetterOrDigit() } }
+            .filter { it.length >= 6 }
+            .groupingBy { it }.eachCount().values.any { it >= 3 }
+        return Eval(all, model, gaps, low, truncated, repeated = rep)
     }
 
     private fun fromJson(o: JSONObject): Eval {
@@ -338,7 +349,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         val lines = (0 until ls.length()).map { val a = ls.getJSONArray(it); Line(a.getLong(0), a.getString(1)) }
         val gs = o.getJSONArray("gaps")
         val gaps = (0 until gs.length()).map { val g = gs.getJSONArray(it); g.getLong(0) to g.getLong(1) }
-        return Eval(lines, o.optString("model"), gaps, o.optBoolean("low"), o.optBoolean("truncated"), o.optString("note"))
+        return Eval(lines, o.optString("model"), gaps, o.optBoolean("low"), o.optBoolean("truncated"), o.optString("note"), o.optBoolean("rep"))
     }
 
     /** 의심 조각: Groq와 Gemini를 모두 돌려 보고, 기존 결과까지 포함해 가장 나은 것을 고름 */
@@ -398,6 +409,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         return JSONObject()
             .put("model", ev.model)
             .put("note", ev.note)
+            .put("rep", ev.repeated)
             .put("low", ev.lowRate)
             .put("truncated", ev.truncated)
             .put("gaps", gs)
@@ -443,6 +455,10 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
             for (i in 0 until gs.length()) {
                 val g = gs.getJSONArray(i)
                 markers.add(Line(g.getLong(0), fmt(g.getLong(0)) + "–" + fmt(g.getLong(1)) + " 공백"))
+                suspects++
+            }
+            if (o.optBoolean("rep")) {
+                markers.add(Line(ch.coreStart, fmt(ch.coreStart) + "–" + fmt(ch.coreEnd) + " 같은 문장 반복"))
                 suspects++
             }
             if (o.optBoolean("low") || o.optBoolean("truncated")) {
