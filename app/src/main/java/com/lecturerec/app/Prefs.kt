@@ -6,7 +6,7 @@ import java.time.LocalDate
 data class ScheduleEntry(val subject: String, val start: LocalDate, val end: LocalDate)
 
 object Prefs {
-    const val DEFAULT_MODELS = "gemini-flash-latest\ngemini-2.5-flash"
+    const val DEFAULT_MODELS = "gemini-3.8-flash\ngemini-3.6-flash"
     const val DEFAULT_SCHEDULE =
         "내분비학 2차,2026-10-01,2026-11-05\n" +
         "혈액종양 1차,2026-11-06,2026-11-26\n" +
