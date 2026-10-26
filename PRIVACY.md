@@ -2,27 +2,35 @@
 
 시행일: 2026년 10월 26일
 
-강의녹음(이하 "앱")은 개인이 자신의 강의 녹음을 전사하기 위해 만든 비상업적 앱입니다.
+「강의녹음」(이하 "앱")은 사용자가 녹음한 강의를 글로 옮기고, 사용자 본인의 Google 드라이브에 보관하기 위한 개인용 앱입니다. 앱 개발자는 별도의 서버를 운영하지 않으며, 사용자의 정보를 수집하거나 보관하지 않습니다.
 
-## 수집하는 정보
-앱은 운영자가 따로 운영하는 서버가 없으며, 이용자의 정보를 운영자에게 전송하거나 수집하지 않습니다.
+## 1. 처리하는 정보
 
-## 기기에 저장되는 정보
-- 이용자가 녹음하거나 불러온 음성 파일과 그 전사본
-- 이용자가 직접 입력한 API 키, 과목 일정 등 설정값
+- 녹음 파일과 전사본(txt): 사용자의 기기에 저장되고, 사용자가 로그인한 경우 사용자 본인의 Google 드라이브에 업로드됩니다.
+- Google 계정 정보: Google 로그인 시 드라이브 접근 권한(토큰)을 받아 기기에만 보관하며, 개발자에게 전송되지 않습니다.
+- API 키(Gemini, Groq): 사용자가 직접 입력하며 기기에만 저장됩니다.
 
-이 정보는 이용자의 기기 안에만 저장되며, 앱을 삭제하면 함께 삭제됩니다.
+## 2. Google 드라이브 접근 범위
 
-## 외부 서비스로 전송되는 정보
-- **Google Gemini API / Groq API**: 전사를 위해 음성 파일이 이용자 본인이 입력한 API 키로 해당 서비스에 전송됩니다. 전송된 데이터의 처리는 각 서비스의 개인정보처리방침을 따릅니다.
-- **Google Drive**: 이용자가 Google 계정으로 로그인한 경우, 음성 파일과 전사본이 이용자 본인의 Google Drive에 저장됩니다. 앱은 `drive.file` 권한만 사용하며, 앱이 만든 파일 외의 Drive 파일에는 접근하지 않습니다.
+앱은 `drive.file` 권한만 사용합니다. 이 권한으로는 앱이 만든 파일(녹음, 전사본)에만 접근할 수 있으며, 사용자의 드라이브에 있는 다른 파일은 읽거나 수정할 수 없습니다.
 
-## Google 사용자 데이터
-앱이 Google API로부터 받은 정보는 위에 적은 기능(이용자 본인 Drive에 파일 저장·불러오기)에만 사용하며, 제3자에게 제공하거나 다른 목적으로 사용하지 않습니다. 앱의 Google API 사용은 Google API 서비스 사용자 데이터 정책(Limited Use 요건 포함)을 따릅니다.
+Google API로 받은 정보의 사용과 다른 앱으로의 전달은 [Google API 서비스 사용자 데이터 정책](https://developers.google.com/terms/api-services-user-data-policy)과 그 제한적 사용(Limited Use) 요건을 따릅니다.
 
-## 문의
+## 3. 제3자 전송
+
+전사를 위해 녹음 파일이 사용자가 입력한 API 키로 다음 서비스에 전송됩니다. 각 서비스의 개인정보처리방침이 적용됩니다.
+
+- Google Gemini API
+- Groq API (예비 엔진, 키를 입력한 경우에만)
+
+이 외에 광고, 분석, 판매 목적으로 정보를 제3자에게 제공하지 않습니다.
+
+## 4. 보관 및 삭제
+
+- 기기에 저장된 파일은 앱의 삭제 기능이나 앱 삭제로 지울 수 있습니다.
+- 드라이브에 올라간 파일은 사용자가 Google 드라이브에서 직접 삭제할 수 있습니다.
+- 드라이브 접근 권한은 Google 계정 설정(보안 → 타사 앱 액세스)에서 언제든 해제할 수 있습니다.
+
+## 5. 문의
+
 chaehyeoni0612@gmail.com
-
----
-
-**English summary.** This app has no server of its own and collects no data. Recordings, transcripts and settings stay on the user's device. Audio is sent to Google Gemini or Groq only for transcription, using the user's own API key. If the user signs in with Google, files are saved to the user's own Google Drive using the `drive.file` scope only. Google user data is used solely for this purpose and is not shared with third parties, in accordance with the Google API Services User Data Policy, including the Limited Use requirements.
