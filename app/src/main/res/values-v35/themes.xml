@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Android 15 이상에서 내용이 상단바 아래로 들어가 가려지는 문제 방지 -->
+    <style name="AppTheme" parent="Theme.AppCompat.DayNight">
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
+    </style>
+</resources>
