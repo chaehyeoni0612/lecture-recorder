@@ -181,6 +181,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         val msg = if (suspectCount > 0) "누락 의심 ${suspectCount}곳" else ""
         Store.writeState(c, base, "done", msg)
         Notif.done(c, "전사 완료", if (msg.isEmpty()) base else "$base · $msg")
+        SyncWorker.enqueue(c)
         return Result.success()
     }
 

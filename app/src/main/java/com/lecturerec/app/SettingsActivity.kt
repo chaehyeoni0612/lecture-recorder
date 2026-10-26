@@ -10,7 +10,10 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.IntentSenderRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import com.google.android.gms.auth.api.identity.Identity
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.textfield.TextInputEditText
@@ -25,6 +28,100 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var schedBox: LinearLayout
     private lateinit var keyEdit: TextInputEditText
     private lateinit var groqEdit: TextInputEditText
+    private lateinit var driveBox: LinearLayout
+
+    private val consent = registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { res ->
+        try {
+            val r = Identity.getAuthorizationClient(this).getAuthorizationResultFromIntent(res.data)
+            if (r.accessToken != null) onDriveAuthorized(r.accessToken!!)
+            else Toast.makeText(this, "드라이브 연결이 취소됐습니다", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Toast.makeText(this, "드라이브 연결이 취소됐습니다", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun connectDrive() {
+        Identity.getAuthorizationClient(this).authorize(Drive.request())
+            .addOnSuccessListener { r ->
+                if (r.hasResolution()) {
+                    val pi = r.pendingIntent
+                    if (pi != null) consent.launch(IntentSenderRequest.Builder(pi.intentSender).build())
+                } else {
+                    r.accessToken?.let { onDriveAuthorized(it) }
+                }
+            }
+            .addOnFailureListener {
+                Toast.makeText(this, "드라이브 연결 실패: ${it.message}", Toast.LENGTH_LONG).show()
+            }
+    }
+
+    private fun onDriveAuthorized(token: String) {
+        DrivePrefs.setConnected(this, true)
+        renderDrive()
+        Thread {
+            val mail = try { Drive.email(token) } catch (e: Exception) { "" }
+            DrivePrefs.setEmail(applicationContext, mail)
+            runOnUiThread { if (!isFinishing) renderDrive() }
+        }.start()
+        SyncWorker.enqueue(this)
+    }
+
+    private fun renderDrive() {
+        driveBox.removeAllViews()
+        val connected = DrivePrefs.connected(this)
+        if (!connected) {
+            driveBox.addView(Ui.sub(this, "녹음과 전사본을 내 드라이브의 강의녹음 폴더에 자동 저장하고, 같은 계정의 다른 기기와 목록을 맞춥니다.").apply {
+                setPadding(0, 0, 0, dp(8))
+            })
+            driveBox.addView(MaterialButton(this).apply {
+                text = "Google 드라이브 연결"
+                textSize = 14f
+                setOnClickListener { connectDrive() }
+            }, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            return
+        }
+        val mail = DrivePrefs.email(this).ifEmpty { "연결됨" }
+        driveBox.addView(Ui.body(this, mail))
+        val last = DrivePrefs.lastSync(this)
+        val sub = when {
+            DrivePrefs.needsReconnect(this) -> "다시 연결이 필요합니다. 아래 버튼을 눌러 주세요."
+            last.isNotEmpty() -> "강의녹음 폴더에 자동 저장 · 마지막 동기화 $last"
+            else -> "강의녹음 폴더에 자동 저장"
+        }
+        driveBox.addView(Ui.sub(this, sub).apply {
+            if (DrivePrefs.needsReconnect(this@SettingsActivity)) post { setTextColor(android.graphics.Color.parseColor("#C0392B")) }
+        })
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(8), 0, 0)
+        }
+        fun outlined(label: String, onClick: () -> Unit) =
+            MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+                text = label
+                textSize = 13f
+                setOnClickListener { onClick() }
+            }
+        if (DrivePrefs.needsReconnect(this)) {
+            row.addView(outlined("다시 연결") { connectDrive() }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = dp(8) })
+        } else {
+            row.addView(outlined("지금 동기화") {
+                SyncWorker.enqueue(this)
+                Toast.makeText(this, "동기화를 시작했습니다", Toast.LENGTH_SHORT).show()
+            }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = dp(8) })
+        }
+        row.addView(outlined("연결 해제") {
+            MaterialAlertDialogBuilder(this)
+                .setMessage("드라이브 연결을 해제할까요? 이미 올라간 파일은 드라이브에 그대로 남습니다.")
+                .setPositiveButton("해제") { _, _ ->
+                    DrivePrefs.setConnected(this, false)
+                    renderDrive()
+                }
+                .setNegativeButton("취소", null)
+                .show()
+        }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        driveBox.addView(row)
+    }
+
 
     private fun dp(v: Int) = Ui.dp(this, v)
 
@@ -59,6 +156,11 @@ class SettingsActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(4), dp(16), dp(16))
         }
+
+        // 드라이브
+        box.addView(Ui.section(this, "Google 드라이브"))
+        driveBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        box.addView(driveBox)
 
         // Gemini 키
         box.addView(Ui.section(this, "Gemini API 키 (기본 전사 엔진)"))
@@ -121,6 +223,7 @@ class SettingsActivity : AppCompatActivity() {
 
         renderModels()
         renderSchedule()
+        renderDrive()
     }
 
     override fun onSupportNavigateUp(): Boolean {

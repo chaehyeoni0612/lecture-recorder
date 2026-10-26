@@ -147,7 +147,23 @@ class DetailActivity : AppCompatActivity() {
         val f = Store.audio(this, base)
         if (!f.exists()) {
             playBtn.isEnabled = false
-            timeText.text = "녹음 파일이 아직 준비되지 않았습니다"
+            if (DrivePrefs.connected(this) && SyncStore.get(this, base).audioId.isNotEmpty()) {
+                timeText.text = "드라이브에서 녹음 내려받는 중…"
+                Thread {
+                    val ok = try { DriveNow.fetchAudio(applicationContext, base) } catch (e: Exception) { false }
+                    runOnUiThread {
+                        if (isFinishing) return@runOnUiThread
+                        if (ok) {
+                            playBtn.isEnabled = true
+                            setupPlayer()
+                        } else {
+                            timeText.text = "녹음을 내려받지 못했습니다. 인터넷이나 드라이브 연결을 확인해 주세요."
+                        }
+                    }
+                }.start()
+            } else {
+                timeText.text = "녹음 파일이 아직 준비되지 않았습니다"
+            }
             return
         }
         val p = MediaPlayer()
@@ -245,6 +261,7 @@ class DetailActivity : AppCompatActivity() {
         if (!editor.isEnabled) return
         Store.txt(this, base).writeText(editor.text.toString())
         dirty = false
+        SyncWorker.enqueue(this)
         Toast.makeText(this, "저장했습니다", Toast.LENGTH_SHORT).show()
     }
 

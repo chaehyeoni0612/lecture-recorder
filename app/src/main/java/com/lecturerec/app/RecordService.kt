@@ -181,6 +181,7 @@ class RecordService : Service() {
         if (base != null) {
             Store.writeState(this, base, "queued", "인터넷 연결되면 시작")
             TranscribeWorker.enqueue(this, base)
+            SyncWorker.enqueue(this)
         }
     }
 

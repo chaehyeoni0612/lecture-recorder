@@ -1,4 +1,31 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="AppTheme" parent="Theme.Material3.DayNight" />
+    <style name="AppTheme.Base" parent="Theme.Material3.DayNight">
+        <item name="colorPrimary">@color/primary</item>
+        <item name="colorOnPrimary">@color/on_primary</item>
+        <item name="colorPrimaryContainer">@color/primary_c</item>
+        <item name="colorOnPrimaryContainer">@color/on_primary_c</item>
+        <item name="colorSecondary">@color/primary</item>
+        <item name="colorOnSecondary">@color/on_primary</item>
+        <item name="colorSecondaryContainer">@color/primary_c</item>
+        <item name="colorOnSecondaryContainer">@color/on_primary_c</item>
+        <item name="colorTertiary">@color/primary</item>
+        <item name="android:colorBackground">@color/bg</item>
+        <item name="colorOnBackground">@color/on_surface</item>
+        <item name="colorSurface">@color/surface</item>
+        <item name="colorOnSurface">@color/on_surface</item>
+        <item name="colorSurfaceVariant">@color/surface_var</item>
+        <item name="colorOnSurfaceVariant">@color/on_surface_var</item>
+        <item name="colorSurfaceContainerLowest">@color/bg</item>
+        <item name="colorSurfaceContainerLow">@color/c_low</item>
+        <item name="colorSurfaceContainer">@color/c</item>
+        <item name="colorSurfaceContainerHigh">@color/c_high</item>
+        <item name="colorSurfaceContainerHighest">@color/c_highest</item>
+        <item name="colorOutline">@color/outline</item>
+        <item name="colorOutlineVariant">@color/outline_var</item>
+        <item name="android:statusBarColor">@color/bg</item>
+        <item name="android:navigationBarColor">@color/bg</item>
+        <item name="android:windowLightStatusBar">@bool/light_bars</item>
+    </style>
+    <style name="AppTheme" parent="AppTheme.Base" />
 </resources>

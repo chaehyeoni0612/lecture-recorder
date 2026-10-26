@@ -27,6 +27,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import java.io.File
@@ -37,6 +38,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var timerText: TextView
     private lateinit var recBtn: MaterialButton
     private lateinit var pauseBtn: MaterialButton
+    private lateinit var driveNote: TextView
+    private lateinit var swipe: SwipeRefreshLayout
     private lateinit var listBox: LinearLayout
     private var subject: String = "강의"
     private var defaultRecTint: ColorStateList? = null
@@ -121,12 +124,29 @@ class MainActivity : AppCompatActivity() {
         root.addView(importBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(6) })
 
         // 목록 영역
-        root.addView(Ui.section(this, "녹음 목록").apply { setPadding(0, dp(28), 0, dp(6)) })
+        val listHead = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.BOTTOM
+        }
+        listHead.addView(Ui.section(this, "녹음 목록").apply { setPadding(0, dp(28), 0, dp(6)) },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        driveNote = Ui.sub(this, "").apply {
+            setPadding(0, 0, 0, dp(6))
+            setOnClickListener { startActivity(Intent(this@MainActivity, SettingsActivity::class.java)) }
+        }
+        listHead.addView(driveNote)
+        root.addView(listHead, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         root.addView(Ui.divider(this))
         listBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val scroll = ScrollView(this)
         scroll.addView(listBox)
-        root.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
+        swipe = SwipeRefreshLayout(this)
+        swipe.addView(scroll)
+        swipe.setOnRefreshListener {
+            if (DrivePrefs.connected(this)) SyncWorker.enqueue(this)
+            handler.postDelayed({ swipe.isRefreshing = false; refreshList(true) }, 2500)
+        }
+        root.addView(swipe, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
 
         setContentView(root)
         askPermissions()
@@ -195,6 +215,7 @@ class MainActivity : AppCompatActivity() {
         subject = Prefs.defaultSubject(this) ?: Prefs.subjects(this).firstOrNull() ?: "강의"
         subjectBtn.text = subject
         handler.post(ticker)
+        SyncWorker.enqueue(this)
         refreshList(true)
         handler.postDelayed(refresher, 3000)
     }
@@ -281,7 +302,19 @@ class MainActivity : AppCompatActivity() {
     private fun refreshList(force: Boolean) {
         val bases = Store.list(this)
         val states = bases.map { Store.readState(this, it) }
-        val sig = bases.zip(states).joinToString("|") { "${it.first}:${it.second.status}:${it.second.msg}" }
+        val drive = DrivePrefs.connected(this)
+        val dlabels = bases.map { if (drive) driveLabel(it) else "" }
+        driveNote.text = when {
+            !drive -> ""
+            DrivePrefs.needsReconnect(this) -> "드라이브 다시 연결 필요"
+            DrivePrefs.lastSync(this).isNotEmpty() -> "동기화 ${DrivePrefs.lastSync(this)}"
+            else -> ""
+        }
+        driveNote.setTextColor(
+            if (DrivePrefs.needsReconnect(this)) Color.parseColor("#C0392B")
+            else Ui.color(driveNote, com.google.android.material.R.attr.colorOnSurfaceVariant)
+        )
+        val sig = bases.zip(states).joinToString("|") { "${it.first}:${it.second.status}:${it.second.msg}" } + dlabels.joinToString()
         if (!force && sig == lastListSignature) return
         lastListSignature = sig
 
@@ -290,7 +323,9 @@ class MainActivity : AppCompatActivity() {
             listBox.addView(Ui.sub(this, "아직 녹음이 없습니다.").apply { setPadding(0, dp(12), 0, 0) })
             return
         }
-        for ((base, st) in bases.zip(states)) {
+        for ((i, pair) in bases.zip(states).withIndex()) {
+            val (base, st) = pair
+            val dl = dlabels[i]
             val row = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -298,7 +333,8 @@ class MainActivity : AppCompatActivity() {
             }
             val texts = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
             texts.addView(Ui.body(this, base))
-            val statusLine = statusLabel(st.status) + if (st.msg.isNotEmpty()) " · ${st.msg}" else ""
+            val statusLine = statusLabel(st.status) + (if (st.msg.isNotEmpty()) " · ${st.msg}" else "") +
+                (if (dl.isNotEmpty()) " · $dl" else "")
             texts.addView(Ui.sub(this, statusLine).apply {
                 val col = statusColor(st.status)
                 if (col != null) post { setTextColor(col) }
@@ -323,15 +359,29 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun driveLabel(base: String): String {
+        val r = SyncStore.get(this, base)
+        val audio = Store.audio(this, base).exists()
+        val txt = Store.txt(this, base)
+        return when {
+            !audio && r.audioId.isNotEmpty() -> "드라이브에만 있음"
+            audio && r.audioId.isEmpty() -> "드라이브 올리기 대기"
+            txt.exists() && txt.lastModified() != r.txtSyncedLocalMtime -> "드라이브 올리기 대기"
+            r.audioId.isNotEmpty() -> "드라이브 ✓"
+            else -> ""
+        }
+    }
+
     private fun showMenu(anchor: TextView, base: String, status: String) {
         val pm = PopupMenu(this, anchor)
-        pm.menu.add(0, 1, 0, "녹음 공유")
+        val hasAudio = Store.audio(this, base).exists()
+        pm.menu.add(0, 1, 0, "녹음 공유").isEnabled = hasAudio
         val hasTxt = Store.txt(this, base).exists()
         pm.menu.add(0, 2, 1, "전사본 공유 (파일)").isEnabled = hasTxt
         pm.menu.add(0, 5, 1, "전사본 복사").isEnabled = hasTxt
         val st = Store.readState(this, base)
-        pm.menu.add(0, 6, 2, "누락 구간 다시 확인").isEnabled = status == "done"
-        pm.menu.add(0, 3, 2, "처음부터 다시 전사")
+        pm.menu.add(0, 6, 2, "누락 구간 다시 확인").isEnabled = status == "done" && hasAudio
+        pm.menu.add(0, 3, 2, "처음부터 다시 전사").isEnabled = hasAudio
         pm.menu.add(0, 4, 3, "삭제")
         pm.setOnMenuItemClickListener {
             when (it.itemId) {
@@ -392,13 +442,38 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun confirmDelete(base: String) {
+        val r = SyncStore.get(this, base)
+        val onDrive = DrivePrefs.connected(this) && (r.audioId.isNotEmpty() || r.txtId.isNotEmpty())
+        val items = if (onDrive) arrayOf("이 기기에서만 삭제", "드라이브에서도 삭제") else arrayOf("삭제")
         MaterialAlertDialogBuilder(this)
-            .setTitle("삭제")
-            .setMessage("$base\n\n녹음과 전사본을 이 폰에서 삭제합니다. 드라이브에 올린 파일은 남습니다.")
-            .setPositiveButton("삭제") { _, _ ->
+            .setTitle(base)
+            .setItems(items) { _, which ->
                 TranscribeWorker.cancel(this, base)
-                Store.delete(this, base)
-                refreshList(true)
+                if (onDrive && which == 1) {
+                    MaterialAlertDialogBuilder(this)
+                        .setMessage("드라이브의 녹음과 전사본까지 지웁니다. 다른 기기에서도 사라집니다.")
+                        .setPositiveButton("삭제") { _, _ ->
+                            Thread {
+                                val ok = try { DriveNow.deleteRemote(applicationContext, base); true } catch (e: Exception) { false }
+                                runOnUiThread {
+                                    if (ok) {
+                                        Store.delete(this, base)
+                                        SyncStore.remove(this, base)
+                                        SyncStore.ignore(this, base)
+                                    } else {
+                                        Toast.makeText(this, "드라이브에서 지우지 못했습니다. 인터넷 연결을 확인해 주세요.", Toast.LENGTH_LONG).show()
+                                    }
+                                    refreshList(true)
+                                }
+                            }.start()
+                        }
+                        .setNegativeButton("취소", null)
+                        .show()
+                } else {
+                    Store.delete(this, base)
+                    if (onDrive) SyncStore.ignore(this, base) else SyncStore.remove(this, base)
+                    refreshList(true)
+                }
             }
             .setNegativeButton("취소", null)
             .show()

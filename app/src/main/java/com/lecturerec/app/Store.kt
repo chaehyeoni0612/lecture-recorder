@@ -22,10 +22,12 @@ object Store {
     fun partsDir(c: Context, base: String) = File(dir(c), "${base}_parts").apply { mkdirs() }
 
     fun list(c: Context): List<String> =
-        (dir(c).listFiles { f -> f.name.endsWith(".m4a") || f.name.endsWith(".src") } ?: emptyArray())
-            .sortedByDescending { it.lastModified() }
-            .map { it.name.removeSuffix(".m4a").removeSuffix(".src") }
+        (dir(c).listFiles { f ->
+            f.name.endsWith(".m4a") || f.name.endsWith(".src") || f.name.endsWith(".state.json")
+        } ?: emptyArray())
+            .map { it.name.removeSuffix(".state.json").removeSuffix(".m4a").removeSuffix(".src") }
             .distinct()
+            .sortedByDescending { it.substringAfter('_', "") }
 
     /** 과목_YYMMDD_HH시MM분 (겹치면 _2, _3 …) */
     fun newBase(c: Context, subject: String, t: LocalDateTime): String {

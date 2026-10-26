@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg">#FAF9F5</color>
+    <color name="surface">#FAF9F5</color>
+    <color name="c_low">#F5F4EF</color>
+    <color name="c">#F0EEE6</color>
+    <color name="c_high">#FFFFFF</color>
+    <color name="c_highest">#FFFFFF</color>
+    <color name="primary">#1F1E1D</color>
+    <color name="on_primary">#FFFFFF</color>
+    <color name="primary_c">#E8E6DC</color>
+    <color name="on_primary_c">#1F1E1D</color>
+    <color name="on_surface">#1F1E1D</color>
+    <color name="surface_var">#F0EEE6</color>
+    <color name="on_surface_var">#6B6A65</color>
+    <color name="outline">#C2C0B6</color>
+    <color name="outline_var">#E3E1D9</color>
+    <bool name="light_bars">true</bool>
+</resources>

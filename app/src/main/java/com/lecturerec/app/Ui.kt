@@ -41,6 +41,6 @@ object Ui {
         textSize = 12f
         setTypeface(typeface, Typeface.BOLD)
         setPadding(0, dp(c, 20), 0, dp(c, 6))
-        post { setTextColor(color(this, com.google.android.material.R.attr.colorPrimary)) }
+        post { setTextColor(color(this, com.google.android.material.R.attr.colorOnSurfaceVariant)) }
     }
 }
