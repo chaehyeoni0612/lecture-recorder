@@ -22,6 +22,8 @@ object DrivePrefs {
     fun needsReconnect(c: Context) = sp(c).getBoolean("reconnect", false)
     fun lastSync(c: Context) = sp(c).getString("last", "") ?: ""
     fun rootId(c: Context) = sp(c).getString("root", "") ?: ""
+    fun autoClean(c: Context) = sp(c).getBoolean("clean", true)
+    fun setAutoClean(c: Context, v: Boolean) = sp(c).edit().putBoolean("clean", v).apply()
     fun setConnected(c: Context, on: Boolean, email: String = "") {
         sp(c).edit().putBoolean("connected", on).putString("email", email).putBoolean("reconnect", false)
             .apply { if (!on) remove("root") }.apply()
@@ -62,6 +64,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             fun folderFor(subject: String) = folders.getOrPut(subject) { Drive.folder(token, subject, root) }
 
             upload(c, token, ::folderFor)
+            cleanLocal(c)
             download(c, token, root)
             DrivePrefs.setLast(c, LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm")))
             Result.success()
@@ -96,6 +99,10 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             }
             if (changed) SyncStore.put(c, base, rec)
         }
+    }
+
+    private fun cleanLocal(c: Context) {
+        for (base in Store.list(c)) DriveNow.cleanOne(c, base)
     }
 
     private fun download(c: Context, token: String, root: String) {
@@ -137,6 +144,19 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
 
 /** 상세 화면 등에서 바로 쓰는 동기 작업 (메인 스레드 금지) */
 object DriveNow {
+    @Volatile var openBase: String? = null
+
+    /** 드라이브에 올라갔고 전사가 끝난 녹음은 기기에서 지움 (설정이 켜져 있을 때) */
+    fun cleanOne(c: Context, base: String) {
+        if (!DrivePrefs.connected(c) || !DrivePrefs.autoClean(c)) return
+        if (base == openBase) return
+        val audio = Store.audio(c, base)
+        if (!audio.exists() || Store.src(c, base).exists()) return
+        if (Store.readState(c, base).status != "done") return
+        if (SyncStore.get(c, base).audioId.isEmpty()) return
+        audio.delete()
+    }
+
     fun fetchAudio(c: Context, base: String): Boolean {
         val rec = SyncStore.get(c, base)
         if (rec.audioId.isEmpty()) return false

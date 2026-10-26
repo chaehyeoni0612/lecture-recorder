@@ -100,6 +100,19 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
                 return Result.failure()
             }
         }
+        if (!audio.exists() && SyncStore.get(c, base).audioId.isNotEmpty()) {
+            // 기기에서 지워진 녹음이면 드라이브에서 다시 받아서 진행
+            Store.writeState(c, base, "transcribing", "드라이브에서 녹음 내려받는 중")
+            try {
+                withContext(Dispatchers.IO) { DriveNow.fetchAudio(c, base) }
+            } catch (e: NeedsReconnect) {
+                Store.writeState(c, base, "failed", "드라이브 다시 연결 후 시도해 주세요")
+                return Result.failure()
+            } catch (e: Exception) {
+                Store.writeState(c, base, "waiting", "녹음 내려받기 실패, 자동 재시도 예정")
+                return Result.retry()
+            }
+        }
         if (!audio.exists()) return Result.failure()
 
         val groqKey = Prefs.groqKey(c)

@@ -120,6 +120,17 @@ class SettingsActivity : AppCompatActivity() {
                 .show()
         }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         driveBox.addView(row)
+        val sw = com.google.android.material.materialswitch.MaterialSwitch(this).apply {
+            text = "드라이브에 올라간 녹음은 기기에서 삭제"
+            textSize = 14f
+            isChecked = DrivePrefs.autoClean(this@SettingsActivity)
+            setOnCheckedChangeListener { _, v ->
+                DrivePrefs.setAutoClean(this@SettingsActivity, v)
+                if (v) SyncWorker.enqueue(this@SettingsActivity)
+            }
+        }
+        driveBox.addView(sw, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(8) })
+        driveBox.addView(Ui.sub(this, "전사가 끝나고 업로드가 확인된 녹음만 지웁니다. 재생할 때 다시 내려받습니다. 전사본은 그대로 남습니다."))
     }
 
 

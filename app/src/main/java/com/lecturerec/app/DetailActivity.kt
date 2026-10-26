@@ -53,6 +53,7 @@ class DetailActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         base = intent.getStringExtra("base") ?: run { finish(); return }
         title = base
+        DriveNow.openBase = base
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
 
         val root = LinearLayout(this).apply {
@@ -297,6 +298,12 @@ class DetailActivity : AppCompatActivity() {
     override fun onDestroy() {
         player?.release()
         player = null
+        if (DriveNow.openBase == base) DriveNow.openBase = null
+        if (::base.isInitialized) {
+            val b = base
+            val app = applicationContext
+            Thread { DriveNow.cleanOne(app, b) }.start()
+        }
         super.onDestroy()
     }
 }

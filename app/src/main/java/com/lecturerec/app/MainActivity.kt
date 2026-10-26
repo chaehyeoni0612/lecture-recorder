@@ -364,6 +364,7 @@ class MainActivity : AppCompatActivity() {
         val audio = Store.audio(this, base).exists()
         val txt = Store.txt(this, base)
         return when {
+            !audio && r.audioId.isNotEmpty() && txt.exists() && txt.lastModified() == r.txtSyncedLocalMtime -> "드라이브 ✓"
             !audio && r.audioId.isNotEmpty() -> "드라이브에만 있음"
             audio && r.audioId.isEmpty() -> "드라이브 올리기 대기"
             txt.exists() && txt.lastModified() != r.txtSyncedLocalMtime -> "드라이브 올리기 대기"
@@ -374,7 +375,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun showMenu(anchor: TextView, base: String, status: String) {
         val pm = PopupMenu(this, anchor)
-        val hasAudio = Store.audio(this, base).exists()
+        val hasAudio = Store.audio(this, base).exists() ||
+            (DrivePrefs.connected(this) && SyncStore.get(this, base).audioId.isNotEmpty())
         pm.menu.add(0, 1, 0, "녹음 공유").isEnabled = hasAudio
         val hasTxt = Store.txt(this, base).exists()
         pm.menu.add(0, 2, 1, "전사본 공유 (파일)").isEnabled = hasTxt
@@ -385,7 +387,7 @@ class MainActivity : AppCompatActivity() {
         pm.menu.add(0, 4, 3, "삭제")
         pm.setOnMenuItemClickListener {
             when (it.itemId) {
-                1 -> share(Store.audio(this, base), "audio/mp4")
+                1 -> shareAudio(base)
                 // text/plain으로 보내면 카톡 등이 파일이 아닌 "글"로 받으려다 실패함 → 일반 파일로 보냄
                 2 -> share(Store.txt(this, base), "application/octet-stream")
                 5 -> copyText(Store.txt(this, base))
@@ -412,6 +414,22 @@ class MainActivity : AppCompatActivity() {
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         i.clipData = ClipData.newRawUri(f.name, uri)
         startActivity(Intent.createChooser(i, f.name))
+    }
+
+    private fun shareAudio(base: String) {
+        val f = Store.audio(this, base)
+        if (f.exists()) {
+            share(f, "audio/mp4")
+            return
+        }
+        Toast.makeText(this, "드라이브에서 녹음 내려받는 중…", Toast.LENGTH_SHORT).show()
+        Thread {
+            val ok = try { DriveNow.fetchAudio(applicationContext, base) } catch (e: Exception) { false }
+            runOnUiThread {
+                if (ok) share(f, "audio/mp4")
+                else Toast.makeText(this, "녹음을 내려받지 못했습니다", Toast.LENGTH_SHORT).show()
+            }
+        }.start()
     }
 
     private fun copyText(f: File) {
