@@ -72,9 +72,17 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         }
     }
 
+    private var curBase = ""
+    private var progress = ""
+
+    private fun status(msg: String) {
+        Store.writeState(applicationContext, curBase, "transcribing", "$progress · $msg")
+    }
+
     override suspend fun doWork(): Result {
         val c = applicationContext
         val base = inputData.getString("base") ?: return Result.failure()
+        curBase = base
         val audio = Store.audio(c, base)
         if (!audio.exists()) return Result.failure()
 
@@ -104,7 +112,8 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         for (ch in chunks) {
             val pf = File(parts, "chunk_%02d.json".format(ch.index))
             if (pf.exists()) continue
-            Store.writeState(c, base, "transcribing", "${ch.index + 1}/${chunks.size} 조각")
+            progress = "${ch.index + 1}/${chunks.size} 조각"
+            Store.writeState(c, base, "transcribing", progress)
             try {
                 val ev = transcribeChunk(audio, ch, key, models, speech, parts)
                 pf.writeText(toJson(ev).toString())
@@ -162,6 +171,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
             var a = 0
             while (true) {
                 try {
+                    status("$m 요청 중")
                     val r = withContext(Dispatchers.IO) { Gemini.transcribe(key, m, bytes, prompt) }
                     return m to r
                 } catch (e: ApiException) {
@@ -176,6 +186,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
                     allNotFound = false
                 }
                 if (a >= waits.size) break
+                status("${lastErr.take(60)} · ${waits[a] / 1000}초 후 재시도")
                 delay(waits[a])
                 a++
             }

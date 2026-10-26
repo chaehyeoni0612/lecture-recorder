@@ -80,7 +80,9 @@ object Gemini {
                     sb.append(p.optString("text"))
                 }
             }
-            if (sb.isBlank()) throw ApiException(-1, "빈 응답 (${c0.optString("finishReason")})")
+            val finish = c0.optString("finishReason")
+            // 말이 없는 짧은 녹음이면 빈 결과가 정상. 그 외 이유로 비었을 때만 오류로 봄.
+            if (sb.isBlank() && finish != "STOP" && finish != "") throw ApiException(-1, "빈 응답 ($finish)")
             return GeminiResult(sb.toString(), c0.optString("finishReason") == "MAX_TOKENS")
         } finally {
             con.disconnect()
