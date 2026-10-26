@@ -328,8 +328,7 @@ class MainActivity : AppCompatActivity() {
         pm.menu.add(0, 2, 1, "전사본 공유 (파일)").isEnabled = hasTxt
         pm.menu.add(0, 5, 1, "전사본 복사").isEnabled = hasTxt
         val st = Store.readState(this, base)
-        pm.menu.add(0, 6, 2, "누락 의심 구간 다시 전사").isEnabled =
-            status == "done" && st.msg.contains("누락 의심")
+        pm.menu.add(0, 6, 2, "누락 구간 다시 확인").isEnabled = status == "done"
         pm.menu.add(0, 3, 2, "처음부터 다시 전사")
         pm.menu.add(0, 4, 3, "삭제")
         pm.setOnMenuItemClickListener {
@@ -340,7 +339,7 @@ class MainActivity : AppCompatActivity() {
                 5 -> copyText(Store.txt(this, base))
                 3 -> retry(base, status)
                 6 -> {
-                    Store.writeState(this, base, "queued", "누락 의심 구간 다시 전사 대기")
+                    Store.writeState(this, base, "queued", "누락 구간 다시 확인 대기")
                     TranscribeWorker.enqueue(this, base, redo = true)
                     refreshList(true)
                 }

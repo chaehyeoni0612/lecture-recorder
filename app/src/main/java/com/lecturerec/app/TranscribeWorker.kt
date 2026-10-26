@@ -144,6 +144,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
 
         // 누락 의심 구간만 다시 전사
         if (inputData.getBoolean("redo", false)) {
+            File(parts, "patches.json").delete()
             for (ch in chunks) {
                 val pf = File(parts, "chunk_%02d.json".format(ch.index))
                 val o = JSONObject(pf.readText())
@@ -166,6 +167,13 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
                     return Result.retry()
                 }
             }
+        }
+
+        progress = "마무리"
+        try {
+            patchGaps(audio, dur, chunks, parts, speech, key, models)
+        } catch (e: FatalApi) {
+        } catch (e: Exception) {
         }
 
         val (text, suspectCount) = assemble(base, dur, chunks, parts)
@@ -416,27 +424,16 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
             .put("lines", ls)
     }
 
-    private fun assemble(base: String, dur: Long, chunks: List<Chunk>, parts: File): Pair<String, Int> {
+    /** 조각들을 합친 본문 줄 (경계 중복 처리 포함) */
+    private fun mergeLines(chunks: List<Chunk>, parts: File): List<Line> {
         val body = mutableListOf<Line>()
-        val markers = mutableListOf<Line>()
-        val modelCount = linkedMapOf<String, Int>()
-        val notes = mutableListOf<String>()
-        var suspects = 0
         var resume = 0L
         for (ch in chunks) {
             val o = JSONObject(File(parts, "chunk_%02d.json".format(ch.index)).readText())
-            val m = o.optString("model")
-            modelCount[m] = (modelCount[m] ?: 0) + 1
-            val note = o.optString("note")
-            if (note.isNotEmpty()) {
-                notes.add("# 조각 ${ch.index + 1} (${fmt(ch.coreStart)}–${fmt(ch.coreEnd)}): $m · $note")
-            }
-
             val ls = o.getJSONArray("lines")
             val lines = (0 until ls.length()).map { val a = ls.getJSONArray(it); Line(a.getLong(0), a.getString(1)) }
                 .sortedBy { it.t }
             // 조각 경계 처리: 다음 조각이 이미 들은 구간(다음 조각 시작+1초 이후)의 줄은 다음 조각 것으로 씀.
-            // 이렇게 하면 경계를 걸친 문장이 두 조각에 중복으로 들어가지 않음.
             val next = chunks.getOrNull(ch.index + 1)
             val handOff = next?.let { it.sendStart + 1000 } ?: Long.MAX_VALUE
             val from = resume - 1500
@@ -450,7 +447,82 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
                 body.add(ln)
             }
             resume = if (firstDropped >= 0) firstDropped else ch.coreEnd
+        }
+        return body.sortedBy { it.t }
+    }
 
+    /**
+     * 말소리가 나는데 받아 적은 줄이 없는 짧은 구간 찾기.
+     * 각 줄이 말해진 길이는 글자 수로 어림(초당 6자, 최대 25초).
+     */
+    private fun findShortGaps(lines: List<Line>, dur: Long, speech: Speech): List<Pair<Long, Long>> {
+        val res = mutableListOf<Pair<Long, Long>>()
+        var prevEnd = 0L
+        fun check(a: Long, b: Long, min: Long) {
+            val len = b - a
+            if (len in min..120_000L && speech.speakingMs(a, b) >= len / 2) res.add(a to b)
+        }
+        for (ln in lines) {
+            check(prevEnd, ln.t, if (prevEnd == 0L) 5_000L else 10_000L)
+            prevEnd = maxOf(prevEnd, ln.t + minOf(25_000L, ln.text.length * 1000L / 6))
+        }
+        check(prevEnd, dur, 10_000L)
+        return res
+    }
+
+    /** 짧은 공백마다 앞뒤 5초 포함해 잘라서 다시 전사하고, 공백 안에 들어가는 줄만 끼워 넣음 */
+    private suspend fun patchGaps(
+        audio: File, dur: Long, chunks: List<Chunk>, parts: File, speech: Speech, gemKey: String, models: List<String>
+    ) {
+        if (gemKey.isEmpty() || models.isEmpty()) return
+        val pf = File(parts, "patches.json")
+        val pj = if (pf.exists()) JSONObject(pf.readText()) else JSONObject().put("lines", JSONArray()).put("tried", JSONArray())
+        val tried = pj.getJSONArray("tried")
+        val triedKeys = (0 until tried.length()).map { tried.getJSONArray(it).let { a -> "${a.getLong(0)}-${a.getLong(1)}" } }.toMutableSet()
+        val gaps = findShortGaps(mergeLines(chunks, parts), dur, speech)
+        var n = 0
+        for ((a, b) in gaps) {
+            if ("$a-$b" in triedKeys) continue
+            if (n >= 40) break
+            n++
+            status("짧은 공백 메우는 중 ${fmt(a)}–${fmt(b)}")
+            val s0 = maxOf(0L, a - 5000)
+            val s1 = minOf(dur, b + 5000)
+            val tmp = File(parts, "patch.m4a")
+            try {
+                val actualStart = withContext(Dispatchers.IO) { Splitter.extract(audio, s0, s1, tmp) }
+                val bytes = tmp.readBytes()
+                val pair = try {
+                    call(gemKey, models, bytes, Gemini.prompt((s1 - s0) / 60000.0))
+                } catch (e: AllBusy) {
+                    break
+                }
+                val got = parse(pair.second.text, actualStart).filter { it.t >= a - 1000 && it.t < b - 500 }
+                val ls = pj.getJSONArray("lines")
+                got.forEach { ls.put(JSONArray().put(it.t).put(it.text)) }
+                tried.put(JSONArray().put(a).put(b).put(got.isNotEmpty()))
+                triedKeys.add("$a-$b")
+                pf.writeText(pj.toString())
+            } finally {
+                tmp.delete()
+            }
+        }
+    }
+
+    private fun assemble(base: String, dur: Long, chunks: List<Chunk>, parts: File): Pair<String, Int> {
+        val body = mergeLines(chunks, parts).toMutableList()
+        val markers = mutableListOf<Line>()
+        val modelCount = linkedMapOf<String, Int>()
+        val notes = mutableListOf<String>()
+        var suspects = 0
+        for (ch in chunks) {
+            val o = JSONObject(File(parts, "chunk_%02d.json".format(ch.index)).readText())
+            val m = o.optString("model")
+            modelCount[m] = (modelCount[m] ?: 0) + 1
+            val note = o.optString("note")
+            if (note.isNotEmpty()) {
+                notes.add("# 조각 ${ch.index + 1} (${fmt(ch.coreStart)}–${fmt(ch.coreEnd)}): $m · $note")
+            }
             val gs = o.getJSONArray("gaps")
             for (i in 0 until gs.length()) {
                 val g = gs.getJSONArray(i)
@@ -466,12 +538,34 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
                 suspects++
             }
         }
-        val merged = body.map { Line(it.t, "[" + fmt(it.t) + "] " + it.text) }.sortedBy { it.t }
+        // 짧은 공백 메운 줄 넣기, 못 메운 곳은 표시
+        var patched = 0
+        val pf = File(parts, "patches.json")
+        if (pf.exists()) {
+            val pj = JSONObject(pf.readText())
+            val ls = pj.getJSONArray("lines")
+            for (i in 0 until ls.length()) {
+                val a = ls.getJSONArray(i)
+                body.add(Line(a.getLong(0), a.getString(1)))
+            }
+            val tr = pj.getJSONArray("tried")
+            for (i in 0 until tr.length()) {
+                val g = tr.getJSONArray(i)
+                if (g.optBoolean(2)) {
+                    patched++
+                } else {
+                    markers.add(Line(g.getLong(0), fmt(g.getLong(0)) + "–" + fmt(g.getLong(1)) + " 짧은 공백"))
+                    suspects++
+                }
+            }
+        }
+        val merged = body.sortedBy { it.t }.map { Line(it.t, "[" + fmt(it.t) + "] " + it.text) }
         val modelsStr = modelCount.entries.joinToString(", ") { "${it.key} ${it.value}조각" }
         val sb = StringBuilder()
         sb.append("# ").append(base).append('\n')
         sb.append("# 녹음 길이 ").append(fmt(dur)).append(" · 전사 모델: ").append(modelsStr).append('\n')
         notes.forEach { sb.append(it).append('\n') }
+        if (patched > 0) sb.append("# 짧은 공백 ").append(patched).append("곳 다시 받아 적어 채움\n")
         if (suspects > 0) {
             sb.append("# 누락 의심 ").append(suspects).append("곳: ")
                 .append(markers.sortedBy { it.t }.joinToString(", ") { it.text }).append('\n')
