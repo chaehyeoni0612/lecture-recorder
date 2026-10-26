@@ -359,21 +359,24 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
             val gs = o.getJSONArray("gaps")
             for (i in 0 until gs.length()) {
                 val g = gs.getJSONArray(i)
-                markers.add(Line(g.getLong(0) + 1, "[누락 의심 " + fmt(g.getLong(0)) + "–" + fmt(g.getLong(1)) + "]"))
+                markers.add(Line(g.getLong(0), fmt(g.getLong(0)) + "–" + fmt(g.getLong(1)) + " 공백"))
                 suspects++
             }
             if (o.optBoolean("low") || o.optBoolean("truncated")) {
-                markers.add(Line(ch.coreStart, "[누락 의심 " + fmt(ch.coreStart) + "–" + fmt(ch.coreEnd) + " · 분량 부족]"))
+                markers.add(Line(ch.coreStart, fmt(ch.coreStart) + "–" + fmt(ch.coreEnd) + " 분량 부족"))
                 suspects++
             }
         }
-        val merged = (body.map { Line(it.t, "[" + fmt(it.t) + "] " + it.text) } + markers).sortedBy { it.t }
+        val merged = body.map { Line(it.t, "[" + fmt(it.t) + "] " + it.text) }.sortedBy { it.t }
         val modelsStr = modelCount.entries.joinToString(", ") { "${it.key} ${it.value}조각" }
         val sb = StringBuilder()
         sb.append("# ").append(base).append('\n')
         sb.append("# 녹음 길이 ").append(fmt(dur)).append(" · 전사 모델: ").append(modelsStr).append('\n')
         notes.forEach { sb.append(it).append('\n') }
-        if (suspects > 0) sb.append("# 누락 의심 ").append(suspects).append("곳 (본문에 [누락 의심] 표시)\n")
+        if (suspects > 0) {
+            sb.append("# 누락 의심 ").append(suspects).append("곳: ")
+                .append(markers.sortedBy { it.t }.joinToString(", ") { it.text }).append('\n')
+        }
         sb.append('\n')
         merged.forEach { sb.append(it.text).append('\n') }
         return sb.toString() to suspects
