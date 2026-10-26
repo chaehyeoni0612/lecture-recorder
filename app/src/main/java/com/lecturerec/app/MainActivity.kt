@@ -7,6 +7,7 @@ import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Build
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -19,6 +20,7 @@ import android.widget.LinearLayout
 import android.widget.PopupMenu
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -50,6 +52,11 @@ class MainActivity : AppCompatActivity() {
             handler.postDelayed(this, 3000)
         }
     }
+
+    private val pickLauncher =
+        registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+            if (uris.isNotEmpty()) importUris(uris)
+        }
 
     private val permLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
@@ -92,6 +99,13 @@ class MainActivity : AppCompatActivity() {
         defaultRecTint = recBtn.backgroundTintList
         root.addView(recBtn, LinearLayout.LayoutParams(MATCH_PARENT, dp(56)))
 
+        val importBtn = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            text = "파일 불러오기"
+            textSize = 14f
+            setOnClickListener { pickLauncher.launch(arrayOf("audio/*", "video/mp4")) }
+        }
+        root.addView(importBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(6) })
+
         // 목록 영역
         root.addView(Ui.section(this, "녹음 목록").apply { setPadding(0, dp(28), 0, dp(6)) })
         root.addView(Ui.divider(this))
@@ -102,6 +116,51 @@ class MainActivity : AppCompatActivity() {
 
         setContentView(root)
         askPermissions()
+        handleShare(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleShare(intent)
+    }
+
+    /** 다른 앱에서 "공유 → 강의녹음"으로 보낸 파일 */
+    private fun handleShare(i: Intent?) {
+        if (i == null) return
+        val uris = mutableListOf<Uri>()
+        @Suppress("DEPRECATION")
+        when (i.action) {
+            Intent.ACTION_SEND -> (i.getParcelableExtra<Uri>(Intent.EXTRA_STREAM))?.let { uris.add(it) }
+            Intent.ACTION_SEND_MULTIPLE -> i.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)?.let { uris.addAll(it) }
+            else -> return
+        }
+        i.action = null
+        if (uris.isNotEmpty()) importUris(uris)
+    }
+
+    private fun importUris(uris: List<Uri>) {
+        if (subject.isBlank() || subject == "강의") {
+            subject = Prefs.defaultSubject(this) ?: Prefs.subjects(this).firstOrNull() ?: "강의"
+        }
+        val subj = subject
+        Toast.makeText(this, "${uris.size}개 불러오는 중 · 과목: $subj", Toast.LENGTH_SHORT).show()
+        Thread {
+            var ok = 0
+            var fail = ""
+            for (u in uris) {
+                try {
+                    Importer.import(applicationContext, u, subj)
+                    ok++
+                } catch (e: Exception) {
+                    fail = e.message ?: "오류"
+                }
+            }
+            runOnUiThread {
+                refreshList(true)
+                val msg = if (fail.isEmpty()) "${ok}개 불러옴" else "${ok}개 불러옴, 실패: $fail"
+                Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+            }
+        }.start()
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {

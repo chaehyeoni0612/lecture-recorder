@@ -84,6 +84,20 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         val base = inputData.getString("base") ?: return Result.failure()
         curBase = base
         val audio = Store.audio(c, base)
+        val src = Store.src(c, base)
+        if (!audio.exists() && src.exists()) {
+            try { setForeground(getForegroundInfo()) } catch (e: Exception) { }
+            Store.writeState(c, base, "transcribing", "파일 변환 중")
+            try {
+                withContext(Dispatchers.IO) { Importer.transcode(src, audio, Store.amp(c, base)) }
+                src.delete()
+            } catch (e: Exception) {
+                audio.delete()
+                Store.amp(c, base).delete()
+                Store.writeState(c, base, "failed", "변환 실패 · ${e.message}")
+                return Result.failure()
+            }
+        }
         if (!audio.exists()) return Result.failure()
 
         val groqKey = Prefs.groqKey(c)

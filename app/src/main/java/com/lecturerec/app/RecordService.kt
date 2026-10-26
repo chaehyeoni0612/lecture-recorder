@@ -13,7 +13,6 @@ import android.os.PowerManager
 import androidx.core.content.ContextCompat
 import java.io.BufferedWriter
 import java.time.LocalDateTime
-import java.time.format.DateTimeFormatter
 
 /** 화면이 꺼져도 계속 녹음하는 포그라운드 서비스. 0.5초마다 음량을 .amp 파일에 기록. */
 class RecordService : Service() {
@@ -65,20 +64,7 @@ class RecordService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun makeBase(subject: String): String {
-        val now = LocalDateTime.now()
-        val clean = subject.replace(Regex("""[\\/:*?"<>|]"""), "").trim().ifEmpty { "강의" }
-        val name = clean + "_" + now.format(DateTimeFormatter.ofPattern("yyMMdd")) +
-            "_" + now.format(DateTimeFormatter.ofPattern("HH")) + "시" +
-            now.format(DateTimeFormatter.ofPattern("mm")) + "분"
-        var base = name
-        var n = 2
-        while (Store.audio(this, base).exists()) {
-            base = "${name}_$n"
-            n++
-        }
-        return base
-    }
+    private fun makeBase(subject: String): String = Store.newBase(this, subject, LocalDateTime.now())
 
     private fun startRec(subject: String) {
         if (recorder != null) return
