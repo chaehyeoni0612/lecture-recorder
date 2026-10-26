@@ -314,7 +314,9 @@ class MainActivity : AppCompatActivity() {
                 }
                 more.setOnClickListener { showMenu(more, base, st.status) }
                 row.addView(more, LinearLayout.LayoutParams(dp(40), dp(40)))
-                row.setOnClickListener { showMenu(more, base, st.status) }
+                row.setOnClickListener {
+                    startActivity(Intent(this, DetailActivity::class.java).putExtra("base", base))
+                }
             }
             listBox.addView(row)
             listBox.addView(Ui.divider(this))
@@ -372,7 +374,7 @@ class MainActivity : AppCompatActivity() {
     private fun retry(base: String, status: String) {
         if (status == "done") {
             MaterialAlertDialogBuilder(this)
-                .setMessage("전사본을 지우고 처음부터 다시 전사할까요?")
+                .setMessage("전사본을 지우고 처음부터 다시 전사할까요? 직접 수정한 내용도 사라집니다.")
                 .setPositiveButton("다시 전사") { _, _ ->
                     Store.clearTranscript(this, base)
                     Store.writeState(this, base, "queued", "인터넷 연결되면 시작")
