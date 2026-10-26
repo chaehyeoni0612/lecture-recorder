@@ -30,9 +30,9 @@ data class Line(val t: Long, val text: String)
 class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
 
     companion object {
-        fun enqueue(c: Context, base: String) {
+        fun enqueue(c: Context, base: String, redo: Boolean = false) {
             val req = OneTimeWorkRequestBuilder<TranscribeWorker>()
-                .setInputData(workDataOf("base" to base))
+                .setInputData(workDataOf("base" to base, "redo" to redo))
                 .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 10, TimeUnit.MINUTES)
                 .build()
@@ -141,9 +141,35 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
             }
         }
 
+        // 누락 의심 구간만 다시 전사
+        if (inputData.getBoolean("redo", false)) {
+            for (ch in chunks) {
+                val pf = File(parts, "chunk_%02d.json".format(ch.index))
+                val o = JSONObject(pf.readText())
+                if (o.optBoolean("redone")) continue
+                val old = fromJson(o)
+                if (!old.suspect) continue
+                progress = "${ch.index + 1}/${chunks.size} 조각 다시 전사"
+                Store.writeState(c, base, "transcribing", progress)
+                try {
+                    val ev = redoChunk(audio, ch, groqKey, key, models, speech, parts, old)
+                    pf.writeText(toJson(ev).put("redone", true).toString())
+                } catch (e: AllBusy) {
+                    Store.writeState(c, base, "waiting", "엔진이 모두 바쁨, 자동 재시도 예정 · ${e.message}")
+                    return Result.retry()
+                } catch (e: FatalApi) {
+                    Store.writeState(c, base, "failed", e.message ?: "API 오류")
+                    return Result.failure()
+                } catch (e: Exception) {
+                    Store.writeState(c, base, "waiting", "오류, 자동 재시도 예정 · ${e.message}")
+                    return Result.retry()
+                }
+            }
+        }
+
         val (text, suspectCount) = assemble(base, dur, chunks, parts)
         Store.txt(c, base).writeText(text)
-        val msg = if (suspectCount > 0) "누락 의심 ${suspectCount}곳 표시됨" else ""
+        val msg = if (suspectCount > 0) "누락 의심 ${suspectCount}곳" else ""
         Store.writeState(c, base, "done", msg)
         Notif.done(c, "전사 완료", if (msg.isEmpty()) base else "$base · $msg")
         return Result.success()
@@ -305,6 +331,63 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         val chars = lines.sumOf { it.text.length }
         val low = speakMin > 1.0 && chars < speakMin * 120
         return Eval(all, model, gaps, low, truncated)
+    }
+
+    private fun fromJson(o: JSONObject): Eval {
+        val ls = o.getJSONArray("lines")
+        val lines = (0 until ls.length()).map { val a = ls.getJSONArray(it); Line(a.getLong(0), a.getString(1)) }
+        val gs = o.getJSONArray("gaps")
+        val gaps = (0 until gs.length()).map { val g = gs.getJSONArray(it); g.getLong(0) to g.getLong(1) }
+        return Eval(lines, o.optString("model"), gaps, o.optBoolean("low"), o.optBoolean("truncated"), o.optString("note"))
+    }
+
+    /** 의심 조각: Groq와 Gemini를 모두 돌려 보고, 기존 결과까지 포함해 가장 나은 것을 고름 */
+    private suspend fun redoChunk(
+        audio: File, ch: Chunk, groqKey: String, gemKey: String, models: List<String>,
+        speech: Speech, parts: File, old: Eval
+    ): Eval {
+        val tmp = File(parts, "chunk_%02d.m4a".format(ch.index))
+        val actualStart = withContext(Dispatchers.IO) { Splitter.extract(audio, ch.sendStart, ch.sendEnd, tmp) }
+        val bytes = tmp.readBytes()
+        val found = mutableListOf<Eval>()
+        var lastBusy: AllBusy? = null
+        try {
+            if (groqKey.isNotEmpty()) {
+                try {
+                    val segs = callGroq(groqKey, bytes)
+                    val lines = segs.map { Line(actualStart + (it.start * 1000).toLong(), it.text) }
+                        .filter { it.t >= ch.sendStart - 2000 && it.t < ch.sendEnd + 2000 }
+                    found.add(evaluate(lines, ch, speech, false, Groq.MODEL))
+                } catch (e: AllBusy) {
+                    lastBusy = e
+                }
+            }
+            if (gemKey.isNotEmpty() && models.isNotEmpty()) {
+                val prompt = Gemini.prompt((ch.sendEnd - ch.sendStart) / 60000.0)
+                for (attempt in 0 until minOf(2, models.size)) {
+                    val order = models.drop(attempt) + models.take(attempt)
+                    try {
+                        val pair = call(gemKey, order, bytes, prompt)
+                        val lines = parse(pair.second.text, actualStart)
+                            .filter { it.t >= ch.sendStart - 2000 && it.t < ch.sendEnd + 2000 }
+                        val ev = evaluate(lines, ch, speech, pair.second.truncated, pair.first)
+                        found.add(ev)
+                        if (!ev.suspect) break
+                    } catch (e: AllBusy) {
+                        lastBusy = e
+                        break
+                    }
+                }
+            }
+        } finally {
+            tmp.delete()
+        }
+        if (found.isEmpty()) throw (lastBusy ?: AllBusy("사용할 수 있는 엔진이 없습니다"))
+        val coreChars = { e: Eval -> e.lines.filter { it.t >= ch.coreStart && it.t < ch.coreEnd }.sumOf { it.text.length } }
+        val pick = (found + old).sortedWith(compareBy<Eval>({ it.suspect }, { -coreChars(it) })).first()
+        val what = if (pick === old) "기존 결과 유지" else "${pick.model} 결과로 교체"
+        val tail = if (pick.suspect) " · 여전히 의심(${describe(pick)})" else ""
+        return pick.copy(note = "다시 전사: 후보 ${found.size + 1}개 중 $what$tail")
     }
 
     private fun toJson(ev: Eval): JSONObject {
