@@ -36,6 +36,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var subjectBtn: MaterialButton
     private lateinit var timerText: TextView
     private lateinit var recBtn: MaterialButton
+    private lateinit var pauseBtn: MaterialButton
     private lateinit var listBox: LinearLayout
     private var subject: String = "강의"
     private var defaultRecTint: ColorStateList? = null
@@ -99,7 +100,18 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener { onRecClick() }
         }
         defaultRecTint = recBtn.backgroundTintList
-        root.addView(recBtn, LinearLayout.LayoutParams(MATCH_PARENT, dp(56)))
+        pauseBtn = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            textSize = 16f
+            visibility = android.view.View.GONE
+            setOnClickListener {
+                if (RecordService.paused) RecordService.resume(this@MainActivity) else RecordService.pause(this@MainActivity)
+                handler.postDelayed({ updateRecUi() }, 300)
+            }
+        }
+        val recRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        recRow.addView(pauseBtn, LinearLayout.LayoutParams(0, dp(56), 1f).apply { marginEnd = dp(8) })
+        recRow.addView(recBtn, LinearLayout.LayoutParams(0, dp(56), 1f))
+        root.addView(recRow, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
         val importBtn = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
             text = "파일 불러오기"
@@ -235,12 +247,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateRecUi() {
         val recording = RecordService.currentBase != null
-        recBtn.text = if (recording) "녹음 정지" else "녹음 시작"
+        recBtn.text = if (recording) "정지" else "녹음 시작"
+        pauseBtn.visibility = if (recording) android.view.View.VISIBLE else android.view.View.GONE
+        pauseBtn.text = if (RecordService.paused) "계속" else "일시정지"
         recBtn.backgroundTintList =
             if (recording) ColorStateList.valueOf(Color.parseColor("#C0392B")) else defaultRecTint
         subjectBtn.isEnabled = !recording
         if (recording) {
-            val s = (System.currentTimeMillis() - RecordService.startedAt) / 1000
+            val s = RecordService.elapsedMs() / 1000
             timerText.text = "%02d:%02d:%02d".format(s / 3600, (s / 60) % 60, s % 60)
         } else {
             timerText.text = "00:00:00"

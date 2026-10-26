@@ -19,11 +19,26 @@ class RecordService : Service() {
 
     companion object {
         private const val ACTION_START = "start"
-        private const val ACTION_STOP = "stop"
+        const val ACTION_STOP = "stop"
+        const val ACTION_PAUSE = "pause"
+        const val ACTION_RESUME = "resume"
         private const val EXTRA_SUBJECT = "subject"
 
         @Volatile var currentBase: String? = null
         @Volatile var startedAt: Long = 0L
+        @Volatile var paused: Boolean = false
+        @Volatile var pausedTotal: Long = 0L
+        @Volatile var pausedAt: Long = 0L
+
+        /** 녹음된 길이(일시정지 시간 제외) */
+        fun elapsedMs(): Long {
+            if (currentBase == null) return 0L
+            val now = System.currentTimeMillis()
+            return now - startedAt - pausedTotal - (if (paused) now - pausedAt else 0L)
+        }
+
+        fun pause(c: Context) = c.startService(Intent(c, RecordService::class.java).setAction(ACTION_PAUSE))
+        fun resume(c: Context) = c.startService(Intent(c, RecordService::class.java).setAction(ACTION_RESUME))
 
         fun start(c: Context, subject: String) {
             val i = Intent(c, RecordService::class.java)
@@ -45,6 +60,11 @@ class RecordService : Service() {
     private val sampler = object : Runnable {
         override fun run() {
             val r = recorder ?: return
+            if (paused) {
+                // 일시정지 중엔 녹음 파일에도 시간이 안 쌓이므로 음량 기록도 멈춤
+                handler.postDelayed(this, 500)
+                return
+            }
             val a = try { r.maxAmplitude } catch (e: Exception) { 0 }
             try {
                 ampWriter?.write(a.toString())
@@ -60,6 +80,8 @@ class RecordService : Service() {
         when (intent?.action) {
             ACTION_START -> startRec(intent.getStringExtra(EXTRA_SUBJECT) ?: "강의")
             ACTION_STOP -> stopRec()
+            ACTION_PAUSE -> pauseRec()
+            ACTION_RESUME -> resumeRec()
         }
         return START_NOT_STICKY
     }
@@ -100,6 +122,8 @@ class RecordService : Service() {
         ampWriter = Store.amp(this, base).bufferedWriter()
         currentBase = base
         startedAt = System.currentTimeMillis()
+        paused = false
+        pausedTotal = 0L
         Store.writeState(this, base, "recording")
 
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -107,6 +131,32 @@ class RecordService : Service() {
             acquire(5 * 60 * 60 * 1000L)
         }
         handler.post(sampler)
+    }
+
+    private fun updateNotif() {
+        val base = currentBase ?: return
+        val n = Notif.recording(this, base, paused, elapsedMs())
+        getSystemService(android.app.NotificationManager::class.java).notify(Notif.REC_ID, n)
+    }
+
+    private fun pauseRec() {
+        val r = recorder ?: return
+        if (paused) return
+        try { r.pause() } catch (e: Exception) { return }
+        pausedAt = System.currentTimeMillis()
+        paused = true
+        currentBase?.let { Store.writeState(this, it, "recording", "일시정지") }
+        updateNotif()
+    }
+
+    private fun resumeRec() {
+        val r = recorder ?: return
+        if (!paused) return
+        try { r.resume() } catch (e: Exception) { return }
+        pausedTotal += System.currentTimeMillis() - pausedAt
+        paused = false
+        currentBase?.let { Store.writeState(this, it, "recording") }
+        updateNotif()
     }
 
     private fun stopRec() {
@@ -123,6 +173,9 @@ class RecordService : Service() {
         wakeLock = null
         currentBase = null
         startedAt = 0L
+        paused = false
+        pausedTotal = 0L
+        pausedAt = 0L
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
         if (base != null) {

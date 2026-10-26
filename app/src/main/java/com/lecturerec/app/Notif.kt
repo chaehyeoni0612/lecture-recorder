@@ -26,16 +26,32 @@ object Notif {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-    fun recording(c: Context, title: String): Notification =
-        NotificationCompat.Builder(c, "rec")
+    private fun svc(c: Context, action: String, code: Int): PendingIntent =
+        PendingIntent.getService(
+            c, code, Intent(c, RecordService::class.java).setAction(action),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+    /** elapsedMs: 지금까지 녹음된 길이(일시정지 시간 제외) */
+    fun recording(c: Context, title: String, paused: Boolean = false, elapsedMs: Long = 0L): Notification {
+        val b = NotificationCompat.Builder(c, "rec")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setContentTitle("녹음 중")
+            .setContentTitle(if (paused) "일시정지됨" else "녹음 중")
             .setContentText(title)
             .setOngoing(true)
-            .setUsesChronometer(true)
-            .setWhen(System.currentTimeMillis())
+            .setOnlyAlertOnce(true)
             .setContentIntent(openApp(c))
-            .build()
+        if (paused) {
+            val s = elapsedMs / 1000
+            b.setSubText("%02d:%02d:%02d".format(s / 3600, (s / 60) % 60, s % 60))
+            b.addAction(0, "계속", svc(c, RecordService.ACTION_RESUME, 11))
+        } else {
+            b.setUsesChronometer(true).setWhen(System.currentTimeMillis() - elapsedMs)
+            b.addAction(0, "일시정지", svc(c, RecordService.ACTION_PAUSE, 12))
+        }
+        b.addAction(0, "정지", svc(c, RecordService.ACTION_STOP, 13))
+        return b.build()
+    }
 
     fun working(c: Context, text: String): Notification =
         NotificationCompat.Builder(c, "work")
