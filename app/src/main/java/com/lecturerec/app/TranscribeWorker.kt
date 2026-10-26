@@ -497,7 +497,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
                 } catch (e: AllBusy) {
                     break
                 }
-                val got = parse(pair.second.text, actualStart).filter { it.t >= a - 1000 && it.t < b - 500 }
+                val got = parse(pair.second.text, actualStart).filter { it.t >= a - 1000 && it.t <= b - 3000 }
                 val ls = pj.getJSONArray("lines")
                 got.forEach { ls.put(JSONArray().put(it.t).put(it.text)) }
                 tried.put(JSONArray().put(a).put(b).put(got.isNotEmpty()))
@@ -544,9 +544,14 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         if (pf.exists()) {
             val pj = JSONObject(pf.readText())
             val ls = pj.getJSONArray("lines")
+            val key = { t: String -> t.lowercase().filter { it.isLetterOrDigit() }.take(12) }
             for (i in 0 until ls.length()) {
                 val a = ls.getJSONArray(i)
-                body.add(Line(a.getLong(0), a.getString(1)))
+                val ln = Line(a.getLong(0), a.getString(1))
+                // 채운 줄이 바로 앞뒤 기존 줄과 같은 문장이면 넣지 않음
+                val k = key(ln.text)
+                val dup = body.any { kotlin.math.abs(it.t - ln.t) <= 8000 && key(it.text) == k }
+                if (!dup) body.add(ln)
             }
             val tr = pj.getJSONArray("tried")
             for (i in 0 until tr.length()) {
