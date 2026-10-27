@@ -375,7 +375,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun showMenu(anchor: TextView, base: String, status: String) {
         val pm = PopupMenu(this, anchor)
-        val hasAudio = Store.audio(this, base).exists() ||
+        val hasAudio = Store.audio(this, base).exists() || Store.src(this, base).exists() ||
             (DrivePrefs.connected(this) && SyncStore.get(this, base).audioId.isNotEmpty())
         pm.menu.add(0, 1, 0, "녹음 공유").isEnabled = hasAudio
         val hasTxt = Store.txt(this, base).exists()
@@ -440,6 +440,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun retry(base: String, status: String) {
+        if (Store.src(this, base).exists()) {
+            // 불러온 파일 변환이 멈춘 경우: 변환부터 다시
+            Store.audio(this, base).delete()
+            Store.amp(this, base).delete()
+            Store.writeState(this, base, "queued", "변환 다시 시작")
+            TranscribeWorker.enqueue(this, base)
+            refreshList(true)
+            return
+        }
         if (status == "done") {
             MaterialAlertDialogBuilder(this)
                 .setMessage("전사본을 지우고 처음부터 다시 전사할까요? 직접 수정한 내용도 사라집니다.")

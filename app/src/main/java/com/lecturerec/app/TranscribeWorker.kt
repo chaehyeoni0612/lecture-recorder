@@ -91,7 +91,17 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
             try { setForeground(getForegroundInfo()) } catch (e: Exception) { }
             Store.writeState(c, base, "transcribing", "파일 변환 중")
             try {
-                withContext(Dispatchers.IO) { Importer.transcode(src, audio, Store.amp(c, base)) }
+                withContext(Dispatchers.IO) {
+                    var last = 0L
+                    Importer.prepare(src, audio, Store.amp(c, base)) { pct ->
+                        if (isStopped) throw java.util.concurrent.CancellationException()
+                        val now = System.currentTimeMillis()
+                        if (now - last > 1500) {
+                            last = now
+                            Store.writeState(c, base, "transcribing", "파일 변환 중 $pct%")
+                        }
+                    }
+                }
                 src.delete()
             } catch (e: Exception) {
                 audio.delete()

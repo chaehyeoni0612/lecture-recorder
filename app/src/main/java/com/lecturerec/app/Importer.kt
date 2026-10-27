@@ -66,7 +66,147 @@ object Importer {
     /**
      * 어떤 형식이든 → 모노 AAC m4a. 0.5초마다 최대 음량을 amp 파일에 기록(앱 녹음과 같은 형식).
      */
-    fun transcode(src: File, out: File, ampFile: File) {
+    /**
+     * 불러온 파일 준비. 이미 AAC(m4a)면 다시 인코딩하지 않고 그대로 옮기고 소리 크기만 기록(빠름).
+     * 그 외 형식만 다시 인코딩. progress: 0~100
+     */
+    fun prepare(src: File, out: File, ampFile: File, progress: (Int) -> Unit) {
+        val ex = MediaExtractor()
+        ex.setDataSource(src.absolutePath)
+        var mime = ""
+        for (i in 0 until ex.trackCount) {
+            val m = ex.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: ""
+            if (m.startsWith("audio/")) { mime = m; break }
+        }
+        ex.release()
+        if (mime == MediaFormat.MIMETYPE_AUDIO_AAC) {
+            remux(src, out)
+            try {
+                ampOnly(src, ampFile, progress)
+            } catch (e: Exception) {
+                ampFile.delete() // 소리 크기 기록이 없어도 전사는 됨
+            }
+        } else {
+            transcode(src, out, ampFile, progress)
+        }
+    }
+
+    /** 다시 인코딩 없이 오디오 트랙만 새 m4a로 옮김 */
+    private fun remux(src: File, out: File) {
+        val ex = MediaExtractor()
+        ex.setDataSource(src.absolutePath)
+        var track = -1
+        for (i in 0 until ex.trackCount) {
+            if ((ex.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: "").startsWith("audio/")) { track = i; break }
+        }
+        ex.selectTrack(track)
+        val mux = MediaMuxer(out.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+        val t = mux.addTrack(ex.getTrackFormat(track))
+        mux.start()
+        val buf = ByteBuffer.allocate(1 shl 20)
+        val info = MediaCodec.BufferInfo()
+        try {
+            while (true) {
+                val n = ex.readSampleData(buf, 0)
+                if (n < 0) break
+                info.offset = 0
+                info.size = n
+                info.presentationTimeUs = ex.sampleTime
+                info.flags = if ((ex.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC) != 0) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
+                mux.writeSampleData(t, buf, info)
+                ex.advance()
+            }
+        } finally {
+            try { mux.stop() } catch (e: Exception) { }
+            mux.release()
+            ex.release()
+        }
+    }
+
+    /** 디코딩만 해서 0.5초마다 최대 음량 기록 (샘플을 듬성듬성 봐서 빠르게) */
+    private fun ampOnly(src: File, ampFile: File, progress: (Int) -> Unit) {
+        val ex = MediaExtractor()
+        ex.setDataSource(src.absolutePath)
+        var track = -1
+        for (i in 0 until ex.trackCount) {
+            if ((ex.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: "").startsWith("audio/")) { track = i; break }
+        }
+        ex.selectTrack(track)
+        val fmt = ex.getTrackFormat(track)
+        val durUs = if (fmt.containsKey(MediaFormat.KEY_DURATION)) fmt.getLong(MediaFormat.KEY_DURATION) else 0L
+        val dec = MediaCodec.createDecoderByType(fmt.getString(MediaFormat.KEY_MIME)!!)
+        dec.configure(fmt, null, null, 0)
+        dec.start()
+        val amps = IntArray(((durUs / 500_000L) + 4).toInt().coerceAtLeast(16))
+        var isFloat = false
+        var lastPct = -1
+        val info = MediaCodec.BufferInfo()
+        var inEOS = false
+        try {
+            while (true) {
+                if (!inEOS) {
+                    val i = dec.dequeueInputBuffer(10_000)
+                    if (i >= 0) {
+                        val b = dec.getInputBuffer(i)!!
+                        val n = ex.readSampleData(b, 0)
+                        if (n < 0) {
+                            dec.queueInputBuffer(i, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            inEOS = true
+                        } else {
+                            dec.queueInputBuffer(i, 0, n, ex.sampleTime, 0)
+                            ex.advance()
+                        }
+                    }
+                }
+                val o = dec.dequeueOutputBuffer(info, 10_000)
+                if (o == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    val f = dec.outputFormat
+                    isFloat = f.containsKey(MediaFormat.KEY_PCM_ENCODING) &&
+                        f.getInteger(MediaFormat.KEY_PCM_ENCODING) == AudioFormat.ENCODING_PCM_FLOAT
+                } else if (o >= 0) {
+                    if (info.size > 0) {
+                        val b = dec.getOutputBuffer(o)!!
+                        b.position(info.offset)
+                        b.limit(info.offset + info.size)
+                        val bb = b.slice().order(ByteOrder.nativeOrder())
+                        var mx = 0
+                        if (isFloat) {
+                            val fb = bb.asFloatBuffer()
+                            var k = 0
+                            while (k < fb.limit()) {
+                                val v = (kotlin.math.abs(fb.get(k)) * 32767f).toInt()
+                                if (v > mx) mx = v
+                                k += 8
+                            }
+                        } else {
+                            val sb = bb.asShortBuffer()
+                            var k = 0
+                            while (k < sb.limit()) {
+                                val v = kotlin.math.abs(sb.get(k).toInt())
+                                if (v > mx) mx = v
+                                k += 8
+                            }
+                        }
+                        val w = (info.presentationTimeUs / 500_000L).toInt()
+                        if (w in amps.indices && mx > amps[w]) amps[w] = mx
+                        if (durUs > 0) {
+                            val pct = (info.presentationTimeUs * 100 / durUs).toInt().coerceIn(0, 100)
+                            if (pct != lastPct) { lastPct = pct; progress(pct) }
+                        }
+                    }
+                    dec.releaseOutputBuffer(o, false)
+                    if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) break
+                }
+            }
+        } finally {
+            try { dec.stop() } catch (e: Exception) { }
+            dec.release()
+            ex.release()
+        }
+        ampFile.bufferedWriter().use { w -> amps.forEach { w.write(it.toString()); w.newLine() } }
+    }
+
+    fun transcode(src: File, out: File, ampFile: File, progress: (Int) -> Unit = {}) {
         val ex = MediaExtractor()
         ex.setDataSource(src.absolutePath)
         var track = -1
@@ -82,6 +222,8 @@ object Importer {
         }
         ex.selectTrack(track)
         val inFmt = ex.getTrackFormat(track)
+        val durUs = if (inFmt.containsKey(MediaFormat.KEY_DURATION)) inFmt.getLong(MediaFormat.KEY_DURATION) else 0L
+        var lastPct = -1
         val dec = MediaCodec.createDecoderByType(inFmt.getString(MediaFormat.KEY_MIME)!!)
         dec.configure(inFmt, null, null, 0)
         dec.start()
@@ -138,6 +280,10 @@ object Importer {
                             f.getInteger(MediaFormat.KEY_PCM_ENCODING) == AudioFormat.ENCODING_PCM_FLOAT
                     } else if (o >= 0) {
                         if (enc == null) enc = makeEncoder(rate)
+                        if (durUs > 0) {
+                            val pct = (info.presentationTimeUs * 100 / durUs).toInt().coerceIn(0, 100)
+                            if (pct != lastPct) { lastPct = pct; progress(pct) }
+                        }
                         val b = dec.getOutputBuffer(o)!!
                         b.position(info.offset)
                         b.limit(info.offset + info.size)
