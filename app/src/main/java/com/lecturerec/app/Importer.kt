@@ -143,27 +143,34 @@ object Importer {
         val info = MediaCodec.BufferInfo()
         var inEOS = false
         try {
-            while (true) {
-                if (!inEOS) {
-                    val i = dec.dequeueInputBuffer(10_000)
-                    if (i >= 0) {
-                        val b = dec.getInputBuffer(i)!!
-                        val n = ex.readSampleData(b, 0)
-                        if (n < 0) {
-                            dec.queueInputBuffer(i, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                            inEOS = true
-                        } else {
-                            dec.queueInputBuffer(i, 0, n, ex.sampleTime, 0)
-                            ex.advance()
-                        }
+            var done = false
+            while (!done) {
+                var idle = true
+                while (!inEOS) {
+                    val i = dec.dequeueInputBuffer(0)
+                    if (i < 0) break
+                    idle = false
+                    val b = dec.getInputBuffer(i)!!
+                    val n = ex.readSampleData(b, 0)
+                    if (n < 0) {
+                        dec.queueInputBuffer(i, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                        inEOS = true
+                    } else {
+                        dec.queueInputBuffer(i, 0, n, ex.sampleTime, 0)
+                        ex.advance()
                     }
                 }
-                val o = dec.dequeueOutputBuffer(info, 10_000)
-                if (o == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                    val f = dec.outputFormat
-                    isFloat = f.containsKey(MediaFormat.KEY_PCM_ENCODING) &&
-                        f.getInteger(MediaFormat.KEY_PCM_ENCODING) == AudioFormat.ENCODING_PCM_FLOAT
-                } else if (o >= 0) {
+                while (true) {
+                    val o = dec.dequeueOutputBuffer(info, if (idle) 2_000 else 0)
+                    if (o == MediaCodec.INFO_TRY_AGAIN_LATER) break
+                    idle = false
+                    if (o == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                        val f = dec.outputFormat
+                        isFloat = f.containsKey(MediaFormat.KEY_PCM_ENCODING) &&
+                            f.getInteger(MediaFormat.KEY_PCM_ENCODING) == AudioFormat.ENCODING_PCM_FLOAT
+                        continue
+                    }
+                    if (o < 0) continue
                     if (info.size > 0) {
                         val b = dec.getOutputBuffer(o)!!
                         b.position(info.offset)
@@ -195,7 +202,7 @@ object Importer {
                         }
                     }
                     dec.releaseOutputBuffer(o, false)
-                    if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) break
+                    if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) { done = true; break }
                 }
             }
         } finally {
@@ -253,25 +260,27 @@ object Importer {
 
         try {
             while (!encEOS) {
-                // 1) 원본 → 디코더
-                if (!inEOS) {
-                    val i = dec.dequeueInputBuffer(10_000)
-                    if (i >= 0) {
-                        val b = dec.getInputBuffer(i)!!
-                        val n = ex.readSampleData(b, 0)
-                        if (n < 0) {
-                            dec.queueInputBuffer(i, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                            inEOS = true
-                        } else {
-                            dec.queueInputBuffer(i, 0, n, ex.sampleTime, 0)
-                            ex.advance()
-                        }
+                var idle = true
+                // 1) 원본 → 디코더 (넣을 수 있는 만큼)
+                while (!inEOS) {
+                    val i = dec.dequeueInputBuffer(0)
+                    if (i < 0) break
+                    idle = false
+                    val b = dec.getInputBuffer(i)!!
+                    val n = ex.readSampleData(b, 0)
+                    if (n < 0) {
+                        dec.queueInputBuffer(i, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                        inEOS = true
+                    } else {
+                        dec.queueInputBuffer(i, 0, n, ex.sampleTime, 0)
+                        ex.advance()
                     }
                 }
 
                 // 2) 디코더 → 모노 PCM
                 if (!decEOS) {
-                    val o = dec.dequeueOutputBuffer(info, 10_000)
+                    val o = dec.dequeueOutputBuffer(info, 0)
+                    if (o != MediaCodec.INFO_TRY_AGAIN_LATER) idle = false
                     if (o == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                         val f = dec.outputFormat
                         rate = f.getInteger(MediaFormat.KEY_SAMPLE_RATE)
@@ -310,13 +319,15 @@ object Importer {
                 val e = enc
                 if (e == null) {
                     if (decEOS) throw IllegalStateException("소리를 읽을 수 없는 파일입니다")
+                    if (idle) Thread.sleep(1)
                     continue
                 }
 
                 // 3) 모노 PCM → 인코더
                 if (!encEosQueued && (queue.isNotEmpty() || decEOS)) {
-                    val i = e.dequeueInputBuffer(10_000)
+                    val i = e.dequeueInputBuffer(0)
                     if (i >= 0) {
+                        idle = false
                         val b = e.getInputBuffer(i)!!
                         b.clear()
                         b.order(ByteOrder.nativeOrder())
@@ -345,7 +356,9 @@ object Importer {
                 }
 
                 // 4) 인코더 → m4a
-                val o = e.dequeueOutputBuffer(info, 10_000)
+                val o = e.dequeueOutputBuffer(info, 0)
+                if (o != MediaCodec.INFO_TRY_AGAIN_LATER) idle = false
+                if (idle) Thread.sleep(1)
                 if (o == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                     muxTrack = mux.addTrack(e.outputFormat)
                     mux.start()
