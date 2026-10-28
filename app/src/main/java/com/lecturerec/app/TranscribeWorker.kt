@@ -303,6 +303,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
     /** 허용된 모델만 순서대로. 모델마다 대기 후 재시도 3번. 전부 막히면 AllBusy. */
     /** 이번 작업에서 한도(429)에 걸린 모델: 다음 조각부터는 건너뜀 */
     private val exhausted = mutableSetOf<String>()
+    private val notFound = mutableSetOf<String>()
 
     /**
      * 모델을 차례로 시도. 429(한도 초과)는 기다리지 않고 바로 다음 모델로 넘어가고, 그 모델은 이번 작업에서 다시 쓰지 않음.
@@ -311,10 +312,9 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
     private suspend fun call(key: String, models: List<String>, bytes: ByteArray, prompt: String): Pair<String, GeminiResult> {
         val waits = longArrayOf(5_000, 20_000)
         var lastErr = ""
-        var allNotFound = true
         var round = 0
         while (true) {
-            val usable = models.filter { it !in exhausted }
+            val usable = models.filter { it !in exhausted && it !in notFound }
             if (usable.isEmpty()) break
             for (m in usable) {
                 try {
@@ -324,23 +324,22 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
                 } catch (e: ApiException) {
                     lastErr = "$m ${e.code}: ${e.message}"
                     when (e.code) {
-                        404 -> { exhausted.add(m); continue }
+                        404 -> { notFound.add(m); continue }
                         400, 401, 403 -> throw FatalApi("API 오류 ${e.code}: ${e.message}")
-                        429 -> { exhausted.add(m); allNotFound = false; status("$m 한도 초과 → 다음 모델") }
-                        else -> allNotFound = false
+                        429 -> { exhausted.add(m); status("$m 한도 초과 → 다음 모델") }
                     }
                 } catch (e: IOException) {
                     lastErr = "$m 네트워크: ${e.message}"
-                    allNotFound = false
                 }
             }
-            if (round >= waits.size || models.all { it in exhausted }) break
+            if (round >= waits.size || models.all { it in exhausted || it in notFound }) break
             status("${lastErr.take(60)} · ${waits[round] / 1000}초 후 다시 시도")
             delay(waits[round])
             round++
         }
-        if (allNotFound) throw FatalApi("설정의 모델 이름을 찾을 수 없습니다 · $lastErr")
-        throw AllBusy(lastErr.take(120))
+        if (models.all { it in notFound }) throw FatalApi("설정의 모델 이름을 찾을 수 없습니다 · $lastErr")
+        if (models.all { it in exhausted || it in notFound }) throw AllBusy("모든 Gemini 모델 한도 초과")
+        throw AllBusy(lastErr.take(120).ifEmpty { "응답 없음" })
     }
 
     private fun parse(text: String, offset: Long): List<Line> {
