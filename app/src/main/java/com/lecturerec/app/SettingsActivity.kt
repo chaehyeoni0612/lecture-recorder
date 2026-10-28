@@ -215,6 +215,9 @@ class SettingsActivity : AppCompatActivity() {
         box.addView(schedBox)
         box.addView(textButton("+ 과목 추가") { editSchedule(-1) }.apply { gravity = Gravity.START or Gravity.CENTER_VERTICAL })
 
+        val ver = try { packageManager.getPackageInfo(packageName, 0).versionName ?: "" } catch (e: Exception) { "" }
+        box.addView(Ui.sub(this, "앱 버전: 빌드 ${ver.substringAfterLast('.')}").apply { setPadding(0, dp(24), 0, 0) })
+
         val scroll = ScrollView(this)
         scroll.addView(box)
 

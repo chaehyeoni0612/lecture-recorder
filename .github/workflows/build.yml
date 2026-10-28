@@ -31,12 +31,12 @@ jobs:
         run: gradle :app:assembleRelease --no-daemon --stacktrace
 
       - name: Rename
-        run: cp app/build/outputs/apk/release/app-release.apk lecture-recorder.apk
+        run: cp app/build/outputs/apk/release/app-release.apk lecture-recorder-${{ github.run_number }}.apk
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
           name: 빌드 ${{ github.run_number }}
-          files: lecture-recorder.apk
+          files: lecture-recorder-${{ github.run_number }}.apk
           make_latest: true
