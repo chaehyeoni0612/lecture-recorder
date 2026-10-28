@@ -250,7 +250,11 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
                         note = "Gemini 결과 누락 의심(${describe(ev)})"
                     } catch (e: AllBusy) {
                         busy = e
-                        note = "Gemini 막힘(${e.message?.take(60)})"
+                        note = "Gemini 막힘(${e.message?.take(80)})"
+                        break
+                    } catch (e: FatalApi) {
+                        if (groqKey.isEmpty()) throw e
+                        note = "Gemini 오류(${e.message?.take(80)})"
                         break
                     }
                 }
@@ -304,6 +308,11 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
     /** 이번 작업에서 한도(429)에 걸린 모델: 다음 조각부터는 건너뜀 */
     private val exhausted = mutableSetOf<String>()
     private val notFound = mutableSetOf<String>()
+    /** 모델별 마지막 오류 (상태줄·txt에 남김) */
+    private val lastCode = linkedMapOf<String, String>()
+
+    private fun errSummary(models: List<String>) =
+        models.joinToString(", ") { m -> "${m.removePrefix("gemini-")} ${lastCode[m] ?: "?"}" }
 
     /**
      * 모델을 차례로 시도. 429(한도 초과)는 기다리지 않고 바로 다음 모델로 넘어가고, 그 모델은 이번 작업에서 다시 쓰지 않음.
@@ -313,6 +322,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         val waits = longArrayOf(5_000, 20_000)
         var lastErr = ""
         var round = 0
+        notFound.clear() // 404는 일시적일 수 있어서 조각마다 다시 확인
         while (true) {
             val usable = models.filter { it !in exhausted && it !in notFound }
             if (usable.isEmpty()) break
@@ -323,6 +333,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
                     return m to r
                 } catch (e: ApiException) {
                     lastErr = "$m ${e.code}: ${e.message}"
+                    lastCode[m] = e.code.toString()
                     when (e.code) {
                         404 -> { notFound.add(m); continue }
                         400, 401, 403 -> throw FatalApi("API 오류 ${e.code}: ${e.message}")
@@ -330,6 +341,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
                     }
                 } catch (e: IOException) {
                     lastErr = "$m 네트워크: ${e.message}"
+                    lastCode[m] = "네트워크"
                 }
             }
             if (round >= waits.size || models.all { it in exhausted || it in notFound }) break
@@ -337,9 +349,8 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
             delay(waits[round])
             round++
         }
-        if (models.all { it in notFound }) throw FatalApi("설정의 모델 이름을 찾을 수 없습니다 · $lastErr")
-        if (models.all { it in exhausted || it in notFound }) throw AllBusy("모든 Gemini 모델 한도 초과")
-        throw AllBusy(lastErr.take(120).ifEmpty { "응답 없음" })
+        // 모델 문제로는 녹음을 실패 처리하지 않음: Groq로 넘기거나 나중에 다시 시도
+        throw AllBusy("Gemini 사용 불가 (${errSummary(models)})")
     }
 
     private fun parse(text: String, offset: Long): List<Line> {
