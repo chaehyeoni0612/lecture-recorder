@@ -134,20 +134,26 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(importBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(6) })
 
-        // 목록 영역
+        // 목록 영역 (태블릿처럼 넓은 화면이면 오른쪽 반)
+        val wide = resources.configuration.screenWidthDp >= 600
+        val left = root
+        val right = if (wide) LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(8), dp(16), 0)
+        } else root
         val listHead = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.BOTTOM
         }
-        listHead.addView(Ui.section(this, "녹음 목록").apply { setPadding(0, dp(28), 0, dp(6)) },
+        listHead.addView(Ui.section(this, "녹음 목록").apply { setPadding(0, if (wide) dp(8) else dp(28), 0, dp(6)) },
             LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         driveNote = Ui.sub(this, "").apply {
             setPadding(0, 0, 0, dp(6))
             setOnClickListener { startActivity(Intent(this@MainActivity, SettingsActivity::class.java)) }
         }
         listHead.addView(driveNote)
-        root.addView(listHead, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        root.addView(Ui.divider(this))
+        right.addView(listHead, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        right.addView(Ui.divider(this))
         listBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val scroll = ScrollView(this)
         scroll.addView(listBox)
@@ -157,9 +163,22 @@ class MainActivity : AppCompatActivity() {
             if (DrivePrefs.connected(this)) SyncWorker.enqueue(this)
             handler.postDelayed({ swipe.isRefreshing = false; refreshList(true) }, 2500)
         }
-        root.addView(swipe, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
+        right.addView(swipe, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
 
-        setContentView(root)
+        val content: android.view.View = if (wide) {
+            left.setPadding(dp(24), dp(24), dp(16), 0)
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                addView(ScrollView(this@MainActivity).apply { addView(left) },
+                    LinearLayout.LayoutParams(0, MATCH_PARENT, 1f))
+                addView(android.view.View(this@MainActivity).apply {
+                    setBackgroundColor(Ui.color(this, com.google.android.material.R.attr.colorOutlineVariant))
+                }, LinearLayout.LayoutParams(dp(1), MATCH_PARENT))
+                addView(right, LinearLayout.LayoutParams(0, MATCH_PARENT, 1f))
+            }
+        } else root
+
+        setContentView(content)
         askPermissions()
         handleShare(intent)
         Reminder.schedule(this)
@@ -383,7 +402,7 @@ class MainActivity : AppCompatActivity() {
             if (DrivePrefs.needsReconnect(this)) Color.parseColor("#C0392B")
             else Ui.color(driveNote, com.google.android.material.R.attr.colorOnSurfaceVariant)
         )
-        val sig = bases.zip(states).joinToString("|") { "${it.first}:${it.second.status}:${it.second.msg}" } + dlabels.joinToString()
+        val sig = bases.zip(states).joinToString("|") { "${it.first}:${it.second.status}:${it.second.msg}:${it.second.step}" } + dlabels.joinToString()
         if (!force && sig == lastListSignature) return
         lastListSignature = sig
 
@@ -408,6 +427,12 @@ class MainActivity : AppCompatActivity() {
                 val col = statusColor(st.status)
                 if (col != null) post { setTextColor(col) }
             })
+            val now = when {
+                st.status == "transcribing" && st.step >= 0 -> st.step
+                st.status == "done" && dl == "드라이브 올리기 대기" -> 4
+                else -> -1
+            }
+            if (now >= 0) texts.addView(stepsRow(now), LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(6) })
             row.addView(texts, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
 
             if (st.status != "recording") {
@@ -426,6 +451,34 @@ class MainActivity : AppCompatActivity() {
             listBox.addView(row)
             listBox.addView(Ui.divider(this))
         }
+    }
+
+    private val stepNames = listOf("변환", "전사", "누락 확인", "정리", "업로드")
+
+    /** 단계 칸: 끝난 칸은 채우고, 지금 칸은 진한 테두리 */
+    private fun stepsRow(now: Int): LinearLayout {
+        val line = Ui.color(listBox, com.google.android.material.R.attr.colorOutlineVariant)
+        val strong = Ui.color(listBox, com.google.android.material.R.attr.colorOnSurface)
+        val weak = Ui.color(listBox, com.google.android.material.R.attr.colorOnSurfaceVariant)
+        val fill = Ui.color(listBox, com.google.android.material.R.attr.colorSurfaceVariant)
+        val r = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        for ((i, n) in stepNames.withIndex()) {
+            val t = TextView(this).apply {
+                text = n
+                textSize = 11f
+                gravity = Gravity.CENTER
+                setPadding(0, dp(4), 0, dp(4))
+                setTextColor(if (i == now) strong else weak)
+                if (i == now) setTypeface(typeface, Typeface.BOLD)
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    cornerRadius = dp(4).toFloat()
+                    setColor(if (i < now) fill else Color.TRANSPARENT)
+                    setStroke(if (i == now) dp(2) else dp(1), if (i == now) strong else line)
+                }
+            }
+            r.addView(t, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { if (i > 0) marginStart = dp(4) })
+        }
+        return r
     }
 
     private fun driveLabel(base: String): String {

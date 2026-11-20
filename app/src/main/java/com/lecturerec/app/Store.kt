@@ -8,7 +8,7 @@ import java.time.format.DateTimeFormatter
 
 /** 녹음 하나 = base 이름 하나. 같은 폴더에 .m4a / .amp / .txt / .state.json / _parts/ */
 object Store {
-    data class State(val status: String, val msg: String = "")
+    data class State(val status: String, val msg: String = "", val step: Int = -1)
 
     /**
      * 내부 저장소 사용 (제목의 ':'은 외부 저장소에서 파일 이름으로 못 써서).
@@ -110,14 +110,15 @@ object Store {
         if (!f.exists()) return State("recorded")
         return try {
             val o = JSONObject(f.readText())
-            State(o.optString("status", "recorded"), o.optString("msg", ""))
+            State(o.optString("status", "recorded"), o.optString("msg", ""), o.optInt("step", -1))
         } catch (e: Exception) {
             State("recorded")
         }
     }
 
-    fun writeState(c: Context, base: String, status: String, msg: String = "") {
-        stateFile(c, base).writeText(JSONObject().put("status", status).put("msg", msg).toString())
+    /** step: 지금 단계 (0 변환, 1 전사, 2 누락 확인, 3 정리), -1이면 표시 안 함 */
+    fun writeState(c: Context, base: String, status: String, msg: String = "", step: Int = -1) {
+        stateFile(c, base).writeText(JSONObject().put("status", status).put("msg", msg).put("step", step).toString())
     }
 
     fun clearTranscript(c: Context, base: String) {

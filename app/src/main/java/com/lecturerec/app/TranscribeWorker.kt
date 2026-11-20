@@ -81,11 +81,12 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
 
     private var curBase = ""
     private var progress = ""
+    @Volatile private var step = 1
 
     @Volatile private var lastStatusAt = 0L
 
     private fun status(msg: String) {
-        Store.writeState(applicationContext, curBase, "transcribing", "$progress, $msg")
+        Store.writeState(applicationContext, curBase, "transcribing", if (progress.isEmpty()) msg else "$progress, $msg", step)
     }
 
     override suspend fun doWork(): Result {
@@ -96,7 +97,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         val src = Store.src(c, base)
         if (!audio.exists() && src.exists()) {
             try { setForeground(getForegroundInfo()) } catch (e: Exception) { }
-            Store.writeState(c, base, "transcribing", "파일 변환 중")
+            Store.writeState(c, base, "transcribing", "파일 변환 중", 0)
             try {
                 withContext(Dispatchers.IO) {
                     var last = 0L
@@ -105,7 +106,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
                         val now = System.currentTimeMillis()
                         if (now - last > 1500) {
                             last = now
-                            Store.writeState(c, base, "transcribing", "파일 변환 중 $pct%")
+                            Store.writeState(c, base, "transcribing", "파일 변환 중 $pct%", 0)
                         }
                     }
                 }
@@ -119,7 +120,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         }
         if (!audio.exists() && SyncStore.get(c, base).audioId.isNotEmpty()) {
             // 기기에서 지워진 녹음이면 드라이브에서 다시 받아서 진행
-            Store.writeState(c, base, "transcribing", "드라이브에서 녹음 내려받는 중")
+            Store.writeState(c, base, "transcribing", "드라이브에서 녹음 내려받는 중", 0)
             try {
                 withContext(Dispatchers.IO) { DriveNow.fetchAudio(c, base) }
             } catch (e: NeedsReconnect) {
@@ -157,7 +158,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         var doneCount = chunks.size - todo.size
         val lock = Any()
         progress = "$doneCount/${chunks.size} 조각 완료"
-        Store.writeState(c, base, "transcribing", progress)
+        Store.writeState(c, base, "transcribing", progress, step)
         try {
             val sem = Semaphore(3)
             coroutineScope {
@@ -169,7 +170,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
                             synchronized(lock) {
                                 doneCount++
                                 progress = "$doneCount/${chunks.size} 조각 완료"
-                                Store.writeState(c, base, "transcribing", progress)
+                                Store.writeState(c, base, "transcribing", progress, step)
                             }
                         }
                     }
@@ -189,6 +190,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         }
 
         // 누락 의심 구간만 다시 전사
+        step = 2
         if (inputData.getBoolean("redo", false)) {
             File(parts, "patches.json").delete()
             for (ch in chunks) {
@@ -198,7 +200,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
                 val old = fromJson(o)
                 if (!old.suspect) continue
                 progress = "${ch.index + 1}/${chunks.size} 조각 다시 전사"
-                Store.writeState(c, base, "transcribing", progress)
+                Store.writeState(c, base, "transcribing", progress, step)
                 try {
                     val ev = redoChunk(audio, ch, groqKey, key, models, speech, parts, old)
                     pf.writeText(toJson(ev).put("redone", true).toString())
@@ -215,13 +217,17 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
             }
         }
 
-        progress = "마무리"
+        progress = ""
+        step = 2
+        Store.writeState(c, base, "transcribing", "누락 구간 확인 중", 2)
         try {
             patchGaps(audio, dur, chunks, parts, speech, key, models)
         } catch (e: FatalApi) {
         } catch (e: Exception) {
         }
 
+        step = 3
+        Store.writeState(c, base, "transcribing", "조각 이어 붙이는 중", 3)
         val (text, suspectCount) = assemble(base, dur, chunks, parts)
         Store.txt(c, base).writeText(text)
         val msg = if (suspectCount > 0) "누락 의심 ${suspectCount}곳" else ""
