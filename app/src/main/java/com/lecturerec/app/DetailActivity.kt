@@ -145,7 +145,7 @@ class DetailActivity : AppCompatActivity() {
     }
 
     private fun setupPlayer() {
-        val f = Store.audio(this, base)
+        val f = Store.audio(this, base).takeIf { it.exists() } ?: Store.src(this, base)
         if (!f.exists()) {
             playBtn.isEnabled = false
             if (DrivePrefs.connected(this) && SyncStore.get(this, base).audioId.isNotEmpty()) {

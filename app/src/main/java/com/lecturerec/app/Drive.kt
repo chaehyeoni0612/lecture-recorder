@@ -139,6 +139,13 @@ object Drive {
         }
     }
 
+    /** 폴더 안에 같은 이름 파일이 이미 있으면 그 id */
+    fun findByName(token: String, name: String, parent: String): String? {
+        val qs = "name='${esc(name)}' and '${esc(parent)}' in parents and trashed=false"
+        val fs = json(token, "$API/files?q=${q(qs)}&fields=files(id)", "GET").optJSONArray("files")
+        return if (fs != null && fs.length() > 0) fs.getJSONObject(0).getString("id") else null
+    }
+
     /** 이름 바꾸기, 필요하면 다른 폴더로 옮기기 */
     fun rename(token: String, id: String, newName: String, newParent: String? = null) {
         var url = "$API/files/$id?fields=id"

@@ -81,6 +81,7 @@ object Importer {
         ex.release()
         if (mime == MediaFormat.MIMETYPE_AUDIO_AAC) {
             remux(src, out)
+            if (ampFile.exists() && ampFile.length() > 0) { progress(100); return } // 녹음할 때 기록한 음량 사용
             try {
                 ampOnly(src, ampFile, progress)
             } catch (e: Exception) {

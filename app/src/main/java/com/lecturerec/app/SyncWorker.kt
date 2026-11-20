@@ -10,6 +10,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
@@ -43,6 +44,9 @@ object DrivePrefs {
 class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
 
     companion object {
+        /** 동기화가 동시에 두 번 돌아 같은 파일이 두 번 올라가지 않게 */
+        private val lock = kotlinx.coroutines.sync.Mutex()
+
         fun enqueue(c: Context) {
             if (!DrivePrefs.connected(c)) return
             val req = OneTimeWorkRequestBuilder<SyncWorker>()
@@ -53,7 +57,9 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         }
     }
 
-    override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
+    override suspend fun doWork(): Result = lock.withLock { work() }
+
+    private suspend fun work(): Result = withContext(Dispatchers.IO) {
         val c = applicationContext
         if (!DrivePrefs.connected(c)) return@withContext Result.success()
         try {
@@ -90,12 +96,14 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             val txt = Store.txt(c, base)
             var changed = false
             if (audio.exists() && rec.audioId.isEmpty() && !Store.src(c, base).exists()) {
-                rec.audioId = Drive.upload(token, audio, "audio/mp4", folderFor(SyncStore.subjectOf(base)), null).first
+                val parent = folderFor(SyncStore.subjectOf(base))
+                rec.audioId = Drive.findByName(token, "$base.m4a", parent)
+                    ?: Drive.upload(token, audio, "audio/mp4", parent, null).first
                 changed = true
             }
             if (txt.exists() && txt.lastModified() != rec.txtSyncedLocalMtime) {
                 val (id, mod) = Drive.upload(
-                    token, txt, "text/plain", folderFor(SyncStore.subjectOf(base)), rec.txtId.ifEmpty { null }
+                    token, txt, "text/plain", folderFor(SyncStore.subjectOf(base)), rec.txtId.ifEmpty { null } ?: Drive.findByName(token, "$base.txt", folderFor(SyncStore.subjectOf(base)))
                 )
                 rec.txtId = id
                 rec.txtRemoteModified = mod

@@ -163,6 +163,7 @@ class MainActivity : AppCompatActivity() {
         askPermissions()
         handleShare(intent)
         Reminder.schedule(this)
+        askBatteryOnce()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -177,6 +178,26 @@ class MainActivity : AppCompatActivity() {
         i.removeExtra("start_record")
         getSystemService(android.app.NotificationManager::class.java).cancel(Notif.REMIND_ID)
         if (RecordService.currentBase == null) onRecClick()
+    }
+
+    /** 녹음이 꺼지지 않게 배터리 최적화 예외를 한 번 요청 */
+    private fun askBatteryOnce() {
+        val pm = getSystemService(android.os.PowerManager::class.java)
+        if (pm.isIgnoringBatteryOptimizations(packageName)) return
+        val sp = getSharedPreferences("settings", MODE_PRIVATE)
+        if (sp.getBoolean("asked_battery", false)) return
+        sp.edit().putBoolean("asked_battery", true).apply()
+        MaterialAlertDialogBuilder(this)
+            .setTitle("녹음이 끊기지 않게")
+            .setMessage("휴대폰이 배터리를 아끼려고 녹음 중인 앱을 끌 수 있습니다. 다음 화면에서 \"허용\"을 눌러 주세요.")
+            .setPositiveButton("설정하기") { _, _ ->
+                try {
+                    startActivity(Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                        .setData(Uri.parse("package:$packageName")))
+                } catch (e: Exception) { }
+            }
+            .setNegativeButton("나중에", null)
+            .show()
     }
 
     private fun currentPeriod(): Int = manualPeriod ?: Store.periodOf(java.time.LocalDateTime.now())
@@ -236,11 +257,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
-        menu.add(0, 1, 0, "설정").setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+        menu.add(0, 2, 0, "카메라").setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+        menu.add(0, 1, 1, "설정").setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
         return true
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        if (item.itemId == 2) {
+            startActivity(Intent(this, CameraActivity::class.java))
+            return true
+        }
         if (item.itemId == 1) {
             startActivity(Intent(this, SettingsActivity::class.java))
             return true
@@ -253,6 +279,7 @@ class MainActivity : AppCompatActivity() {
         subject = Prefs.defaultSubject(this) ?: Prefs.subjects(this).firstOrNull() ?: "강의"
         subjectBtn.text = subject
         handler.post(ticker)
+        Recovery.run(this)
         SyncWorker.enqueue(this)
         refreshList(true)
         handler.postDelayed(refresher, 3000)
