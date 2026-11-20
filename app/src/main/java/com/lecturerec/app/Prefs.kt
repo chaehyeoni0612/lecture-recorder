@@ -6,7 +6,7 @@ import java.time.LocalDate
 data class ScheduleEntry(val subject: String, val start: LocalDate, val end: LocalDate)
 
 object Prefs {
-    const val DEFAULT_MODELS = "gemini-3.8-flash\ngemini-3.6-flash"
+    const val DEFAULT_MODELS = "gemini-3.6-flash\ngemini-3.8-flash\ngemini-3-flash\ngemini-2.5-flash"
     const val DEFAULT_SCHEDULE =
         "내분비학 2차,2026-10-01,2026-11-05\n" +
         "혈액종양 1차,2026-11-06,2026-11-26\n" +
@@ -16,7 +16,17 @@ object Prefs {
 
     fun groqKey(c: Context): String = (sp(c).getString("groq_key", "") ?: "").trim()
     fun apiKey(c: Context): String = (sp(c).getString("api_key", "") ?: "").trim()
-    fun modelsText(c: Context): String = sp(c).getString("models", DEFAULT_MODELS) ?: DEFAULT_MODELS
+    fun modelsText(c: Context): String {
+        // 모델 순서 바뀐 버전: 한 번만 새 기본값으로 교체
+        if (!sp(c).getBoolean("models_v2", false)) {
+            sp(c).edit().putString("models", DEFAULT_MODELS).putBoolean("models_v2", true).apply()
+        }
+        return sp(c).getString("models", DEFAULT_MODELS) ?: DEFAULT_MODELS
+    }
+    fun recorderName(c: Context): String = (sp(c).getString("recorder", "") ?: "").trim()
+    fun setRecorderName(c: Context, v: String) = sp(c).edit().putString("recorder", v.trim()).apply()
+    fun remindersOn(c: Context): Boolean = sp(c).getBoolean("reminders", true)
+    fun setRemindersOn(c: Context, v: Boolean) = sp(c).edit().putBoolean("reminders", v).apply()
     fun scheduleText(c: Context): String = sp(c).getString("schedule", DEFAULT_SCHEDULE) ?: DEFAULT_SCHEDULE
 
     fun models(c: Context): List<String> =

@@ -14,6 +14,11 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -77,8 +82,10 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
     private var curBase = ""
     private var progress = ""
 
+    @Volatile private var lastStatusAt = 0L
+
     private fun status(msg: String) {
-        Store.writeState(applicationContext, curBase, "transcribing", "$progress · $msg")
+        Store.writeState(applicationContext, curBase, "transcribing", "$progress, $msg")
     }
 
     override suspend fun doWork(): Result {
@@ -106,7 +113,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
             } catch (e: Exception) {
                 audio.delete()
                 Store.amp(c, base).delete()
-                Store.writeState(c, base, "failed", "변환 실패 · ${e.message}")
+                Store.writeState(c, base, "failed", "변환 실패, ${e.message}")
                 return Result.failure()
             }
         }
@@ -145,24 +152,40 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         val speech = Speech(amps)
         val parts = Store.partsDir(c, base)
 
-        for (ch in chunks) {
-            val pf = File(parts, "chunk_%02d.json".format(ch.index))
-            if (pf.exists()) continue
-            progress = "${ch.index + 1}/${chunks.size} 조각"
-            Store.writeState(c, base, "transcribing", progress)
-            try {
-                val ev = transcribeChunk(audio, ch, groqKey, key, models, speech, parts)
-                pf.writeText(toJson(ev).toString())
-            } catch (e: AllBusy) {
-                Store.writeState(c, base, "waiting", "엔진이 모두 바쁨, 자동 재시도 예정 · ${e.message}")
-                return Result.retry()
-            } catch (e: FatalApi) {
-                Store.writeState(c, base, "failed", e.message ?: "API 오류")
-                return Result.failure()
-            } catch (e: Exception) {
-                Store.writeState(c, base, "waiting", "오류, 자동 재시도 예정 · ${e.message}")
-                return Result.retry()
+        // 조각 3개씩 동시에 전사
+        val todo = chunks.filter { !File(parts, "chunk_%02d.json".format(it.index)).exists() }
+        var doneCount = chunks.size - todo.size
+        val lock = Any()
+        progress = "$doneCount/${chunks.size} 조각 완료"
+        Store.writeState(c, base, "transcribing", progress)
+        try {
+            val sem = Semaphore(3)
+            coroutineScope {
+                todo.map { ch ->
+                    async {
+                        sem.withPermit {
+                            val ev = transcribeChunk(audio, ch, groqKey, key, models, speech, parts)
+                            File(parts, "chunk_%02d.json".format(ch.index)).writeText(toJson(ev).toString())
+                            synchronized(lock) {
+                                doneCount++
+                                progress = "$doneCount/${chunks.size} 조각 완료"
+                                Store.writeState(c, base, "transcribing", progress)
+                            }
+                        }
+                    }
+                }.awaitAll()
             }
+        } catch (e: AllBusy) {
+            Store.writeState(c, base, "waiting", "엔진이 모두 바쁨, 자동 재시도 예정, ${e.message}")
+            return Result.retry()
+        } catch (e: FatalApi) {
+            Store.writeState(c, base, "failed", e.message ?: "API 오류")
+            return Result.failure()
+        } catch (e: java.util.concurrent.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Store.writeState(c, base, "waiting", "오류, 자동 재시도 예정, ${e.message}")
+            return Result.retry()
         }
 
         // 누락 의심 구간만 다시 전사
@@ -180,13 +203,13 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
                     val ev = redoChunk(audio, ch, groqKey, key, models, speech, parts, old)
                     pf.writeText(toJson(ev).put("redone", true).toString())
                 } catch (e: AllBusy) {
-                    Store.writeState(c, base, "waiting", "엔진이 모두 바쁨, 자동 재시도 예정 · ${e.message}")
+                    Store.writeState(c, base, "waiting", "엔진이 모두 바쁨, 자동 재시도 예정, ${e.message}")
                     return Result.retry()
                 } catch (e: FatalApi) {
                     Store.writeState(c, base, "failed", e.message ?: "API 오류")
                     return Result.failure()
                 } catch (e: Exception) {
-                    Store.writeState(c, base, "waiting", "오류, 자동 재시도 예정 · ${e.message}")
+                    Store.writeState(c, base, "waiting", "오류, 자동 재시도 예정, ${e.message}")
                     return Result.retry()
                 }
             }
@@ -203,7 +226,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         Store.txt(c, base).writeText(text)
         val msg = if (suspectCount > 0) "누락 의심 ${suspectCount}곳" else ""
         Store.writeState(c, base, "done", msg)
-        Notif.done(c, "전사 완료", if (msg.isEmpty()) base else "$base · $msg")
+        Notif.done(c, "전사 완료", if (msg.isEmpty()) base else "$base, $msg")
         SyncWorker.enqueue(c)
         return Result.success()
     }
@@ -279,7 +302,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         }
         if (found.isEmpty()) throw (busy ?: AllBusy("사용할 수 있는 엔진이 없습니다"))
         val pick = found.sortedWith(compareBy<Eval>({ it.suspect }, { -it.chars })).first()
-        return pick.copy(note = "$note · 후보 ${found.size}개 중 ${pick.model} 결과 사용")
+        return pick.copy(note = "$note, 후보 ${found.size}개 중 ${pick.model} 결과 사용")
     }
 
     /** Groq(예비): 바쁘면 대기 후 3번까지 재시도, 그래도 안 되면 AllBusy */
@@ -298,7 +321,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
                 lastErr = "Groq 네트워크: ${e.message}"
             }
             if (a >= waits.size) throw AllBusy(lastErr.take(120))
-            status("${lastErr.take(60)} · ${waits[a] / 1000}초 후 재시도")
+            status("${lastErr.take(60)}, ${waits[a] / 1000}초 후 재시도")
             delay(waits[a])
             a++
         }
@@ -306,10 +329,10 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
 
     /** 허용된 모델만 순서대로. 모델마다 대기 후 재시도 3번. 전부 막히면 AllBusy. */
     /** 이번 작업에서 한도(429)에 걸린 모델: 다음 조각부터는 건너뜀 */
-    private val exhausted = mutableSetOf<String>()
-    private val notFound = mutableSetOf<String>()
+    private val exhausted: MutableSet<String> = java.util.Collections.synchronizedSet(mutableSetOf())
+    private val notFound: MutableSet<String> = java.util.Collections.synchronizedSet(mutableSetOf())
     /** 모델별 마지막 오류 (상태줄·txt에 남김) */
-    private val lastCode = linkedMapOf<String, String>()
+    private val lastCode: MutableMap<String, String> = java.util.Collections.synchronizedMap(linkedMapOf())
 
     private fun errSummary(models: List<String>) =
         models.joinToString(", ") { m -> "${m.removePrefix("gemini-")} ${lastCode[m] ?: "?"}" }
@@ -322,7 +345,6 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         val waits = longArrayOf(5_000, 20_000)
         var lastErr = ""
         var round = 0
-        notFound.clear() // 404는 일시적일 수 있어서 조각마다 다시 확인
         while (true) {
             val usable = models.filter { it !in exhausted && it !in notFound }
             if (usable.isEmpty()) break
@@ -345,7 +367,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
                 }
             }
             if (round >= waits.size || models.all { it in exhausted || it in notFound }) break
-            status("${lastErr.take(60)} · ${waits[round] / 1000}초 후 다시 시도")
+            status("${lastErr.take(60)}, ${waits[round] / 1000}초 후 다시 시도")
             delay(waits[round])
             round++
         }
@@ -449,7 +471,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         val coreChars = { e: Eval -> e.lines.filter { it.t >= ch.coreStart && it.t < ch.coreEnd }.sumOf { it.text.length } }
         val pick = (found + old).sortedWith(compareBy<Eval>({ it.suspect }, { -coreChars(it) })).first()
         val what = if (pick === old) "기존 결과 유지" else "${pick.model} 결과로 교체"
-        val tail = if (pick.suspect) " · 여전히 의심(${describe(pick)})" else ""
+        val tail = if (pick.suspect) ", 여전히 의심(${describe(pick)})" else ""
         return pick.copy(note = "다시 전사: 후보 ${found.size + 1}개 중 $what$tail")
     }
 
@@ -565,7 +587,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
             modelCount[m] = (modelCount[m] ?: 0) + 1
             val note = o.optString("note")
             if (note.isNotEmpty()) {
-                notes.add("# 조각 ${ch.index + 1} (${fmt(ch.coreStart)}–${fmt(ch.coreEnd)}): $m · $note")
+                notes.add("# 조각 ${ch.index + 1} (${fmt(ch.coreStart)}–${fmt(ch.coreEnd)}): $m, $note")
             }
             val gs = o.getJSONArray("gaps")
             for (i in 0 until gs.length()) {
@@ -612,7 +634,7 @@ class TranscribeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker
         val modelsStr = modelCount.entries.joinToString(", ") { "${it.key} ${it.value}조각" }
         val sb = StringBuilder()
         sb.append("# ").append(base).append('\n')
-        sb.append("# 녹음 길이 ").append(fmt(dur)).append(" · 전사 모델: ").append(modelsStr).append('\n')
+        sb.append("# 녹음 길이 ").append(fmt(dur)).append(", 전사 모델: ").append(modelsStr).append('\n')
         notes.forEach { sb.append(it).append('\n') }
         if (patched > 0) sb.append("# 짧은 공백 ").append(patched).append("곳 다시 받아 적어 채움\n")
         if (suspects > 0) {

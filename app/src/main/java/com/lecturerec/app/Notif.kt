@@ -11,6 +11,7 @@ import androidx.core.app.NotificationCompat
 object Notif {
     const val REC_ID = 1
     const val WORK_ID = 2
+    const val REMIND_ID = 3
     private var doneId = 100
 
     fun ensureChannels(c: Context) {
@@ -18,6 +19,7 @@ object Notif {
         nm.createNotificationChannel(NotificationChannel("rec", "녹음", NotificationManager.IMPORTANCE_LOW))
         nm.createNotificationChannel(NotificationChannel("work", "전사 진행", NotificationManager.IMPORTANCE_LOW))
         nm.createNotificationChannel(NotificationChannel("done", "전사 완료", NotificationManager.IMPORTANCE_DEFAULT))
+        nm.createNotificationChannel(NotificationChannel("remind", "녹음 알림", NotificationManager.IMPORTANCE_HIGH))
     }
 
     private fun openApp(c: Context): PendingIntent =
@@ -50,7 +52,11 @@ object Notif {
             b.addAction(0, "일시정지", svc(c, RecordService.ACTION_PAUSE, 12))
         }
         b.addAction(0, "정지", svc(c, RecordService.ACTION_STOP, 13))
-        return b.build()
+        // 안드로이드 14부터는 밀어서 지울 수 있음 → 지우면 바로 다시 띄움
+        b.setDeleteIntent(svc(c, RecordService.ACTION_RENOTIFY, 14))
+        val n = b.build()
+        n.flags = n.flags or Notification.FLAG_NO_CLEAR or Notification.FLAG_ONGOING_EVENT
+        return n
     }
 
     fun working(c: Context, text: String): Notification =

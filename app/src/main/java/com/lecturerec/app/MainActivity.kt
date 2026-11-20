@@ -42,6 +42,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var swipe: SwipeRefreshLayout
     private lateinit var listBox: LinearLayout
     private var subject: String = "강의"
+    /** 직접 고른 교시 (null이면 시작 시각으로 자동) */
+    private var manualPeriod: Int? = null
+    private lateinit var periodBtn: MaterialButton
     private var defaultRecTint: ColorStateList? = null
     private val handler = Handler(Looper.getMainLooper())
     private var lastListSignature = ""
@@ -80,14 +83,22 @@ class MainActivity : AppCompatActivity() {
         }
 
         // 녹음 영역
-        root.addView(Ui.section(this, "과목"))
+        root.addView(Ui.section(this, "과목, 교시"))
         subjectBtn = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
             textSize = 14f
             gravity = Gravity.START or Gravity.CENTER_VERTICAL
             setAllCaps(false)
             setOnClickListener { chooseSubject() }
         }
-        root.addView(subjectBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        periodBtn = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            textSize = 14f
+            setAllCaps(false)
+            setOnClickListener { choosePeriod() }
+        }
+        val selRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        selRow.addView(subjectBtn, LinearLayout.LayoutParams(0, WRAP_CONTENT, 2f).apply { marginEnd = dp(8) })
+        selRow.addView(periodBtn, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        root.addView(selRow, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
         timerText = TextView(this).apply {
             textSize = 40f
@@ -151,11 +162,38 @@ class MainActivity : AppCompatActivity() {
         setContentView(root)
         askPermissions()
         handleShare(intent)
+        Reminder.schedule(this)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         handleShare(intent)
+    }
+
+    /** 녹음 알림의 "녹음 시작" 버튼으로 열렸을 때 */
+    private fun handleStartFromReminder(i: Intent?) {
+        if (i?.getBooleanExtra("start_record", false) != true) return
+        i.removeExtra("start_record")
+        getSystemService(android.app.NotificationManager::class.java).cancel(Notif.REMIND_ID)
+        if (RecordService.currentBase == null) onRecClick()
+    }
+
+    private fun currentPeriod(): Int = manualPeriod ?: Store.periodOf(java.time.LocalDateTime.now())
+
+    private fun periodLabel(p: Int) = if (p > 0) "${p}교시" else "교시 없음"
+
+    private fun choosePeriod() {
+        val labels = arrayOf("자동 (시작 시각 기준)") + (1..8).map { "${it}교시" }.toTypedArray() + arrayOf("교시 없음")
+        val cur = when (manualPeriod) { null -> 0; 0 -> 9; else -> manualPeriod!! }
+        MaterialAlertDialogBuilder(this)
+            .setTitle("교시")
+            .setSingleChoiceItems(labels, cur) { d, which ->
+                manualPeriod = when (which) { 0 -> null; 9 -> 0; else -> which }
+                updateRecUi()
+                d.dismiss()
+            }
+            .show()
     }
 
     /** 다른 앱에서 "공유 → 강의녹음"으로 보낸 파일 */
@@ -177,7 +215,7 @@ class MainActivity : AppCompatActivity() {
             subject = Prefs.defaultSubject(this) ?: Prefs.subjects(this).firstOrNull() ?: "강의"
         }
         val subj = subject
-        Toast.makeText(this, "${uris.size}개 불러오는 중 · 과목: $subj", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "${uris.size}개 불러오는 중, 과목: $subj", Toast.LENGTH_SHORT).show()
         Thread {
             var ok = 0
             var fail = ""
@@ -218,6 +256,7 @@ class MainActivity : AppCompatActivity() {
         SyncWorker.enqueue(this)
         refreshList(true)
         handler.postDelayed(refresher, 3000)
+        handleStartFromReminder(intent)
     }
 
     override fun onPause() {
@@ -258,7 +297,8 @@ class MainActivity : AppCompatActivity() {
                 askPermissions()
                 return
             }
-            RecordService.start(this, subject)
+            RecordService.start(this, subject, currentPeriod())
+            manualPeriod = null
         }
         handler.postDelayed({
             updateRecUi()
@@ -274,6 +314,8 @@ class MainActivity : AppCompatActivity() {
         recBtn.backgroundTintList =
             if (recording) ColorStateList.valueOf(Color.parseColor("#C0392B")) else defaultRecTint
         subjectBtn.isEnabled = !recording
+        periodBtn.isEnabled = !recording
+        periodBtn.text = periodLabel(currentPeriod()) + if (manualPeriod == null && !recording) " (자동)" else ""
         if (recording) {
             val s = RecordService.elapsedMs() / 1000
             timerText.text = "%02d:%02d:%02d".format(s / 3600, (s / 60) % 60, s % 60)
@@ -333,8 +375,8 @@ class MainActivity : AppCompatActivity() {
             }
             val texts = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
             texts.addView(Ui.body(this, base))
-            val statusLine = statusLabel(st.status) + (if (st.msg.isNotEmpty()) " · ${st.msg}" else "") +
-                (if (dl.isNotEmpty()) " · $dl" else "")
+            val statusLine = statusLabel(st.status) + (if (st.msg.isNotEmpty()) ", ${st.msg}" else "") +
+                (if (dl.isNotEmpty()) ", $dl" else "")
             texts.addView(Ui.sub(this, statusLine).apply {
                 val col = statusColor(st.status)
                 if (col != null) post { setTextColor(col) }
@@ -384,6 +426,7 @@ class MainActivity : AppCompatActivity() {
         val st = Store.readState(this, base)
         pm.menu.add(0, 6, 2, "누락 구간 다시 확인").isEnabled = status == "done" && hasAudio
         pm.menu.add(0, 3, 2, "처음부터 다시 전사").isEnabled = hasAudio
+        pm.menu.add(0, 7, 3, "제목 수정")
         pm.menu.add(0, 4, 3, "삭제")
         pm.setOnMenuItemClickListener {
             when (it.itemId) {
@@ -398,6 +441,7 @@ class MainActivity : AppCompatActivity() {
                     refreshList(true)
                 }
                 4 -> confirmDelete(base)
+                7 -> renameDialog(base, status)
             }
             true
         }
@@ -466,6 +510,61 @@ class MainActivity : AppCompatActivity() {
             TranscribeWorker.enqueue(this, base)
             refreshList(true)
         }
+    }
+
+    private fun renameDialog(base: String, status: String) {
+        if (status in setOf("recording", "queued", "transcribing", "waiting")) {
+            Toast.makeText(this, "녹음이나 전사가 끝난 뒤에 바꿀 수 있습니다", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val til = com.google.android.material.textfield.TextInputLayout(
+            this, null, com.google.android.material.R.attr.textInputOutlinedStyle
+        ).apply { hint = "제목" }
+        val et = com.google.android.material.textfield.TextInputEditText(til.context).apply {
+            setText(base)
+            setSelection(base.length)
+        }
+        til.addView(et)
+        val wrap = LinearLayout(this).apply {
+            setPadding(dp(20), dp(8), dp(20), 0)
+            addView(til, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle("제목 수정")
+            .setView(wrap)
+            .setPositiveButton("저장") { _, _ ->
+                val to = (et.text?.toString() ?: "").replace(Regex("""[\\/*?"<>|\n]"""), "").trim()
+                if (to.isEmpty() || to == base) return@setPositiveButton
+                if (Store.exists(this, to)) {
+                    Toast.makeText(this, "같은 제목이 이미 있습니다", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                Store.rename(this, base, to)
+                SyncStore.move(this, base, to)
+                val txt = Store.txt(this, to)
+                if (txt.exists()) {
+                    val lines = txt.readLines().toMutableList()
+                    if (lines.isNotEmpty() && lines[0] == "# $base") {
+                        lines[0] = "# $to"
+                        txt.writeText(lines.joinToString("\n") + "\n")
+                    }
+                }
+                refreshList(true)
+                if (DrivePrefs.connected(this)) {
+                    Thread {
+                        try {
+                            DriveNow.renameRemote(applicationContext, to)
+                        } catch (e: Exception) {
+                            runOnUiThread {
+                                Toast.makeText(this, "드라이브 이름은 못 바꿨습니다. 다음 동기화 때 다시 시도합니다.", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                        SyncWorker.enqueue(applicationContext)
+                    }.start()
+                }
+            }
+            .setNegativeButton("취소", null)
+            .show()
     }
 
     private fun confirmDelete(base: String) {

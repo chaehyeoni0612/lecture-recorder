@@ -22,6 +22,11 @@ object DrivePrefs {
     fun needsReconnect(c: Context) = sp(c).getBoolean("reconnect", false)
     fun lastSync(c: Context) = sp(c).getString("last", "") ?: ""
     fun rootId(c: Context) = sp(c).getString("root", "") ?: ""
+    /** 친구가 공유해 준 폴더 (있으면 내 폴더 대신 사용) */
+    fun sharedRoot(c: Context) = sp(c).getString("shared_root", "") ?: ""
+    fun sharedRootName(c: Context) = sp(c).getString("shared_root_name", "") ?: ""
+    fun setSharedRoot(c: Context, id: String, name: String) =
+        sp(c).edit().putString("shared_root", id).putString("shared_root_name", name).apply()
     fun autoClean(c: Context) = sp(c).getBoolean("clean", true)
     fun setAutoClean(c: Context, v: Boolean) = sp(c).edit().putBoolean("clean", v).apply()
     fun setConnected(c: Context, on: Boolean, email: String = "") {
@@ -57,7 +62,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             if (DrivePrefs.email(c).isEmpty()) {
                 try { DrivePrefs.setEmail(c, Drive.email(token)) } catch (e: Exception) { }
             }
-            val root = DrivePrefs.rootId(c).ifEmpty {
+            val root = DrivePrefs.sharedRoot(c).ifEmpty { null } ?: DrivePrefs.rootId(c).ifEmpty {
                 Drive.folder(token, Drive.ROOT_NAME, null).also { DrivePrefs.setRoot(c, it) }
             }
             val folders = mutableMapOf<String, String>()
@@ -65,7 +70,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
 
             upload(c, token, ::folderFor)
             cleanLocal(c)
-            download(c, token, root)
+            download(c, token, root, ::folderFor)
             DrivePrefs.setLast(c, LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm")))
             Result.success()
         } catch (e: NeedsReconnect) {
@@ -105,14 +110,35 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         for (base in Store.list(c)) DriveNow.cleanOne(c, base)
     }
 
-    private fun download(c: Context, token: String, root: String) {
+    private fun download(c: Context, token: String, root: String, folderFor: (String) -> String) {
         val ignored = SyncStore.ignored(c)
         val localBases = Store.list(c).toSet()
+        // 드라이브 파일 id → 이 기기의 녹음 이름 (이 기기에서 이름을 바꾼 경우 찾기 위해)
+        val byId = mutableMapOf<String, String>()
+        val recs = SyncStore.load(c).optJSONObject("recs")
+        recs?.keys()?.forEach { b ->
+            val o = recs.optJSONObject(b) ?: return@forEach
+            o.optString("audioId").takeIf { it.isNotEmpty() }?.let { byId[it] = b }
+            o.optString("txtId").takeIf { it.isNotEmpty() }?.let { byId[it] = b }
+        }
         for (folder in Drive.list(token, root).filter { it.mime == "application/vnd.google-apps.folder" }) {
             val files = Drive.list(token, folder.id)
             val byBase = files.groupBy { it.name.substringBeforeLast('.') }
-            for ((base, items) in byBase) {
-                if (base in ignored) continue
+            for ((remoteBase, items0) in byBase) {
+                if (remoteBase in ignored) continue
+                // 이 기기에서 이름을 바꿨는데 드라이브는 옛 이름이면 드라이브 이름을 맞춤
+                val items = items0.filter { item ->
+                    val mine = byId[item.id]
+                    if (mine != null && mine != remoteBase) {
+                        try {
+                            Drive.rename(token, item.id, mine + "." + item.name.substringAfterLast('.'),
+                                folderFor(SyncStore.subjectOf(mine)))
+                        } catch (e: Exception) { }
+                        false
+                    } else true
+                }
+                if (items.isEmpty()) continue
+                val base = remoteBase
                 val a = items.firstOrNull { it.name.endsWith(".m4a") }
                 val t = items.firstOrNull { it.name.endsWith(".txt") }
                 val rec = SyncStore.get(c, base)
@@ -162,6 +188,19 @@ object DriveNow {
         if (rec.audioId.isEmpty()) return false
         Drive.download(Drive.token(c), rec.audioId, Store.audio(c, base))
         return true
+    }
+
+    /** 기기에서 이름을 바꾼 녹음의 드라이브 파일 이름도 바꿈 (과목이 바뀌면 폴더도 옮김) */
+    fun renameRemote(c: Context, base: String) {
+        val rec = SyncStore.get(c, base)
+        if (rec.audioId.isEmpty() && rec.txtId.isEmpty()) return
+        val token = Drive.token(c)
+        val root = DrivePrefs.sharedRoot(c).ifEmpty { null } ?: DrivePrefs.rootId(c).ifEmpty {
+            Drive.folder(token, Drive.ROOT_NAME, null).also { DrivePrefs.setRoot(c, it) }
+        }
+        val parent = Drive.folder(token, SyncStore.subjectOf(base), root)
+        if (rec.audioId.isNotEmpty()) Drive.rename(token, rec.audioId, "$base.m4a", parent)
+        if (rec.txtId.isNotEmpty()) Drive.rename(token, rec.txtId, "$base.txt", parent)
     }
 
     fun deleteRemote(c: Context, base: String) {

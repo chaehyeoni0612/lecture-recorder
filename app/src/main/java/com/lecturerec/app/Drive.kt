@@ -16,7 +16,8 @@ class NeedsReconnect : Exception("드라이브 다시 연결 필요")
 
 /** Google 드라이브 REST (drive.file 권한: 이 앱이 만든 파일만 보임) */
 object Drive {
-    const val SCOPE = "https://www.googleapis.com/auth/drive.file"
+    /** 친구와 같은 폴더를 쓰려면 남이 만든 파일도 보여야 해서 전체 드라이브 권한 */
+    const val SCOPE = "https://www.googleapis.com/auth/drive"
     private const val API = "https://www.googleapis.com/drive/v3"
     private const val UP = "https://www.googleapis.com/upload/drive/v3"
     private const val FOLDER = "application/vnd.google-apps.folder"
@@ -138,6 +139,28 @@ object Drive {
         }
     }
 
+    /** 이름 바꾸기, 필요하면 다른 폴더로 옮기기 */
+    fun rename(token: String, id: String, newName: String, newParent: String? = null) {
+        var url = "$API/files/$id?fields=id"
+        if (newParent != null) {
+            val cur = json(token, "$API/files/$id?fields=parents", "GET").optJSONArray("parents")
+            val old = (0 until (cur?.length() ?: 0)).joinToString(",") { cur!!.getString(it) }
+            url += "&addParents=${q(newParent)}" + if (old.isNotEmpty()) "&removeParents=${q(old)}" else ""
+        }
+        json(token, url, "PATCH", JSONObject().put("name", newName))
+    }
+
+    /** 폴더 링크나 ID에서 ID만 뽑기 */
+    fun folderIdFrom(text: String): String? {
+        val t = text.trim()
+        Regex("""folders/([A-Za-z0-9_-]{10,})""").find(t)?.let { return it.groupValues[1] }
+        Regex("""[?&]id=([A-Za-z0-9_-]{10,})""").find(t)?.let { return it.groupValues[1] }
+        return if (Regex("""^[A-Za-z0-9_-]{10,}$""").matches(t)) t else null
+    }
+
+    fun folderName(token: String, id: String): String =
+        json(token, "$API/files/$id?fields=name,mimeType", "GET").optString("name")
+
     fun download(token: String, id: String, dest: File) {
         val con = open(token, "$API/files/$id?alt=media", "GET")
         try {
@@ -202,6 +225,16 @@ object SyncStore {
     }
 
     @Synchronized
+    fun move(c: Context, from: String, to: String) {
+        val all = load(c)
+        val recs = all.optJSONObject("recs") ?: return
+        val o = recs.optJSONObject(from) ?: return
+        recs.remove(from)
+        recs.put(to, o)
+        save(c, all)
+    }
+
+    @Synchronized
     fun remove(c: Context, base: String) {
         val all = load(c)
         all.optJSONObject("recs")?.remove(base)
@@ -224,5 +257,5 @@ object SyncStore {
 
     /** 파일 이름에서 과목 뽑기: 과목_YYMMDD_HH시MM분(_n) */
     fun subjectOf(base: String): String =
-        Regex("""^(.*)_\d{6}_\d{2}시\d{2}분(_\d+)?$""").find(base)?.groupValues?.get(1)?.ifBlank { null } ?: "기타"
+        Regex("""^(.*?)_\d{6}_""").find(base)?.groupValues?.get(1)?.ifBlank { null } ?: "기타"
 }

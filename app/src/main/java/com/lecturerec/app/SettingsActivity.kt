@@ -27,6 +27,7 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var modelBox: LinearLayout
     private lateinit var schedBox: LinearLayout
     private lateinit var keyEdit: TextInputEditText
+    private lateinit var nameEdit: TextInputEditText
     private lateinit var groqEdit: TextInputEditText
     private lateinit var driveBox: LinearLayout
 
@@ -66,6 +67,72 @@ class SettingsActivity : AppCompatActivity() {
         SyncWorker.enqueue(this)
     }
 
+    private fun copyMyFolderLink() {
+        Thread {
+            val link = try {
+                val token = Drive.token(applicationContext)
+                val id = DrivePrefs.rootId(applicationContext).ifEmpty {
+                    Drive.folder(token, Drive.ROOT_NAME, null).also { DrivePrefs.setRoot(applicationContext, it) }
+                }
+                "https://drive.google.com/drive/folders/$id"
+            } catch (e: NeedsReconnect) {
+                DrivePrefs.setReconnect(applicationContext, true)
+                null
+            } catch (e: Exception) { null }
+            runOnUiThread {
+                if (link == null) {
+                    Toast.makeText(this, "폴더를 확인하지 못했습니다. 드라이브 연결을 확인해 주세요.", Toast.LENGTH_LONG).show()
+                    renderDrive()
+                    return@runOnUiThread
+                }
+                val cm = getSystemService(android.content.ClipboardManager::class.java)
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("강의녹음 폴더", link))
+                Toast.makeText(this, "링크를 복사했습니다. 드라이브 앱에서 이 폴더를 친구에게 편집자로 공유해 주세요.", Toast.LENGTH_LONG).show()
+            }
+        }.start()
+    }
+
+    private fun enterSharedLink() {
+        val (til, et) = outlinedField("폴더 링크")
+        val wrap = LinearLayout(this).apply {
+            setPadding(dp(20), dp(8), dp(20), 0)
+            addView(til, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle("공유 폴더 링크 입력")
+            .setMessage("친구가 보내 준 강의녹음 폴더 링크를 붙여 넣으세요. 앞으로 녹음과 전사본이 이 폴더에 저장됩니다.")
+            .setView(wrap)
+            .setPositiveButton("확인") { _, _ ->
+                val id = Drive.folderIdFrom(et.text?.toString() ?: "")
+                if (id == null) {
+                    Toast.makeText(this, "링크를 알아보지 못했습니다", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                Thread {
+                    val name = try { Drive.folderName(Drive.token(applicationContext), id) } catch (e: Exception) { null }
+                    runOnUiThread {
+                        if (name == null) {
+                            Toast.makeText(this, "폴더를 열 수 없습니다. 공유(편집자)가 됐는지, 드라이브 연결이 됐는지 확인해 주세요.", Toast.LENGTH_LONG).show()
+                        } else {
+                            DrivePrefs.setSharedRoot(this, id, name)
+                            renderDrive()
+                            SyncWorker.enqueue(this)
+                            Toast.makeText(this, "\"$name\" 폴더에 저장합니다", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }.start()
+            }
+            .setNegativeButton("취소", null)
+            .show()
+    }
+
+    private fun outlined(label: String, onClick: () -> Unit) =
+        MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            text = label
+            textSize = 13f
+            setOnClickListener { onClick() }
+        }
+
     private fun renderDrive() {
         driveBox.removeAllViews()
         val connected = DrivePrefs.connected(this)
@@ -85,7 +152,7 @@ class SettingsActivity : AppCompatActivity() {
         val last = DrivePrefs.lastSync(this)
         val sub = when {
             DrivePrefs.needsReconnect(this) -> "다시 연결이 필요합니다. 아래 버튼을 눌러 주세요."
-            last.isNotEmpty() -> "강의녹음 폴더에 자동 저장 · 마지막 동기화 $last"
+            last.isNotEmpty() -> "강의녹음 폴더에 자동 저장, 마지막 동기화 $last"
             else -> "강의녹음 폴더에 자동 저장"
         }
         driveBox.addView(Ui.sub(this, sub).apply {
@@ -131,6 +198,29 @@ class SettingsActivity : AppCompatActivity() {
         }
         driveBox.addView(sw, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(8) })
         driveBox.addView(Ui.sub(this, "전사가 끝나고 업로드가 확인된 녹음만 지웁니다. 재생할 때 다시 내려받습니다. 전사본은 그대로 남습니다."))
+
+        // 친구와 같은 폴더 쓰기
+        driveBox.addView(Ui.body(this, "같이 쓰는 폴더").apply { setPadding(0, dp(16), 0, 0) })
+        val shared = DrivePrefs.sharedRoot(this)
+        if (shared.isNotEmpty()) {
+            driveBox.addView(Ui.sub(this, "친구가 공유한 폴더(${DrivePrefs.sharedRootName(this).ifEmpty { "이름 확인 중" }})에 저장 중입니다."))
+            driveBox.addView(outlined("내 폴더로 되돌리기") {
+                DrivePrefs.setSharedRoot(this, "", "")
+                renderDrive()
+                SyncWorker.enqueue(this)
+            }, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(6) })
+        } else {
+            driveBox.addView(Ui.sub(this, "내가 폴더 주인이면 링크를 복사해 드라이브에서 친구에게 편집자로 공유하세요. 친구는 그 링크를 아래 \"공유 폴더 링크 입력\"에 넣으면 됩니다."))
+            val r2 = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(6), 0, 0)
+            }
+            r2.addView(outlined("내 폴더 링크 복사") { copyMyFolderLink() },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = dp(8) })
+            r2.addView(outlined("공유 폴더 링크 입력") { enterSharedLink() },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+            driveBox.addView(r2)
+        }
     }
 
 
@@ -167,6 +257,29 @@ class SettingsActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(4), dp(16), dp(16))
         }
+
+        // 녹음자
+        box.addView(Ui.section(this, "녹음자 이름"))
+        val (nameLayout, ne) = outlinedField("이름 (예: 채현)")
+        nameEdit = ne
+        nameEdit.setText(Prefs.recorderName(this))
+        box.addView(nameLayout)
+        box.addView(Ui.sub(this, "제목 끝에 붙습니다. 예: 내분비학 2차_261026_7교시(15:26)_채현").apply {
+            setPadding(dp(4), dp(4), 0, 0)
+        })
+
+        // 녹음 알림
+        box.addView(Ui.section(this, "녹음 알림"))
+        box.addView(com.google.android.material.materialswitch.MaterialSwitch(this).apply {
+            text = "평일 수업 시작 전 녹음 알림"
+            textSize = 14f
+            isChecked = Prefs.remindersOn(this@SettingsActivity)
+            setOnCheckedChangeListener { _, v ->
+                Prefs.setRemindersOn(this@SettingsActivity, v)
+                Reminder.schedule(this@SettingsActivity)
+            }
+        }, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        box.addView(Ui.sub(this, "8:30, 9:30, 10:30, 11:30, 13:30, 14:30, 15:30, 16:30. 녹음 중이면 울리지 않습니다."))
 
         // 드라이브
         box.addView(Ui.section(this, "Google 드라이브"))
@@ -248,6 +361,7 @@ class SettingsActivity : AppCompatActivity() {
     private fun save() {
         val modelsText = models.joinToString("\n")
         val schedText = schedule.joinToString("\n") { "${it.subject},${it.start},${it.end}" }
+        Prefs.setRecorderName(this, nameEdit.text?.toString() ?: "")
         Prefs.save(this, groqEdit.text?.toString() ?: "", keyEdit.text?.toString() ?: "", modelsText, schedText)
         Toast.makeText(this, "저장했습니다", Toast.LENGTH_SHORT).show()
         finish()
@@ -319,7 +433,7 @@ class SettingsActivity : AppCompatActivity() {
                 setOnClickListener { editSchedule(i) }
             }
             val now = !today.isBefore(e.start) && !today.isAfter(e.end)
-            row.addView(Ui.body(this, e.subject + if (now) "  · 진행 중" else ""))
+            row.addView(Ui.body(this, e.subject + if (now) " , 진행 중" else ""))
             row.addView(Ui.sub(this, "${e.start} ~ ${e.end}"))
             schedBox.addView(row)
             schedBox.addView(Ui.divider(this))

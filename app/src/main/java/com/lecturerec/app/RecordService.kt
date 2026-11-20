@@ -23,6 +23,8 @@ class RecordService : Service() {
         const val ACTION_PAUSE = "pause"
         const val ACTION_RESUME = "resume"
         private const val EXTRA_SUBJECT = "subject"
+        private const val EXTRA_PERIOD = "period"
+        const val ACTION_RENOTIFY = "renotify"
 
         @Volatile var currentBase: String? = null
         @Volatile var startedAt: Long = 0L
@@ -40,10 +42,11 @@ class RecordService : Service() {
         fun pause(c: Context) = c.startService(Intent(c, RecordService::class.java).setAction(ACTION_PAUSE))
         fun resume(c: Context) = c.startService(Intent(c, RecordService::class.java).setAction(ACTION_RESUME))
 
-        fun start(c: Context, subject: String) {
+        fun start(c: Context, subject: String, period: Int? = null) {
             val i = Intent(c, RecordService::class.java)
                 .setAction(ACTION_START)
                 .putExtra(EXTRA_SUBJECT, subject)
+                .putExtra(EXTRA_PERIOD, period ?: -1)
             ContextCompat.startForegroundService(c, i)
         }
 
@@ -78,7 +81,11 @@ class RecordService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_START -> startRec(intent.getStringExtra(EXTRA_SUBJECT) ?: "강의")
+            ACTION_START -> startRec(
+                intent.getStringExtra(EXTRA_SUBJECT) ?: "강의",
+                intent.getIntExtra(EXTRA_PERIOD, -1).takeIf { it >= 0 }
+            )
+            ACTION_RENOTIFY -> updateNotif()
             ACTION_STOP -> stopRec()
             ACTION_PAUSE -> pauseRec()
             ACTION_RESUME -> resumeRec()
@@ -86,12 +93,10 @@ class RecordService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun makeBase(subject: String): String = Store.newBase(this, subject, LocalDateTime.now())
-
-    private fun startRec(subject: String) {
+    private fun startRec(subject: String, period: Int?) {
         if (recorder != null) return
         Notif.ensureChannels(this)
-        val base = makeBase(subject)
+        val base = Store.newBase(this, subject, LocalDateTime.now(), period)
         val notif = Notif.recording(this, base)
         if (Build.VERSION.SDK_INT >= 30) {
             startForeground(Notif.REC_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)

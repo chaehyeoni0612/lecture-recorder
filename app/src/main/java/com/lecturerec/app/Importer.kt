@@ -32,7 +32,7 @@ object Importer {
             requireNotNull(input) { "파일을 열 수 없습니다" }
             dst.outputStream().use { input.copyTo(it) }
         }
-        Store.writeState(c, base, "queued", "불러옴 · 변환 후 전사")
+        Store.writeState(c, base, "queued", "불러옴, 변환 후 전사")
         TranscribeWorker.enqueue(c, base)
         return base
     }
