@@ -17,6 +17,20 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import android.annotation.SuppressLint
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.graphics.BitmapFactory
+import android.net.Uri
+import android.view.GestureDetector
+import android.view.MotionEvent
+import android.view.ScaleGestureDetector
+import android.widget.ImageView
+import androidx.camera.core.Camera
+import androidx.camera.core.FocusMeteringAction
+import androidx.core.content.FileProvider
+import java.io.File
+import java.util.concurrent.TimeUnit
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
@@ -35,6 +49,13 @@ class CameraActivity : AppCompatActivity() {
     private lateinit var flash: View
     private lateinit var countText: TextView
     private var count = 0
+    private var camera: Camera? = null
+    private lateinit var focusBox: View
+    private lateinit var zoomText: TextView
+    private lateinit var copyBtn: TextView
+    private lateinit var thumb: ImageView
+    private var lastClip: File? = null
+    private var copyOn = true
 
     private val perm = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
         if (ok) startCamera() else {
@@ -58,6 +79,52 @@ class CameraActivity : AppCompatActivity() {
             alpha = 0f
         }
         root.addView(flash, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+
+        focusBox = View(this).apply {
+            background = GradientDrawable().apply {
+                setColor(Color.TRANSPARENT)
+                setStroke(dp(2), Color.WHITE)
+            }
+            alpha = 0f
+        }
+        root.addView(focusBox, FrameLayout.LayoutParams(dp(64), dp(64)))
+
+        zoomText = TextView(this).apply {
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            text = "1.0x"
+        }
+        root.addView(zoomText, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+            bottomMargin = dp(128)
+        })
+
+        copyOn = getSharedPreferences("settings", MODE_PRIVATE).getBoolean("cam_copy", true)
+        copyBtn = TextView(this).apply {
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            setPadding(dp(16), dp(20), dp(16), dp(20))
+            setOnClickListener {
+                copyOn = !copyOn
+                getSharedPreferences("settings", MODE_PRIVATE).edit().putBoolean("cam_copy", copyOn).apply()
+                updateCopyBtn()
+            }
+        }
+        updateCopyBtn()
+        root.addView(copyBtn, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.TOP or Gravity.CENTER_HORIZONTAL))
+
+        thumb = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            setBackgroundColor(Color.DKGRAY)
+            visibility = View.INVISIBLE
+            setOnClickListener {
+                lastClip?.let { copyToClipboard(it) }
+                Toast.makeText(this@CameraActivity, "클립보드에 복사함", Toast.LENGTH_SHORT).show()
+            }
+        }
+        root.addView(thumb, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.BOTTOM or Gravity.START).apply {
+            bottomMargin = dp(50)
+            marginStart = dp(28)
+        })
 
         val back = TextView(this).apply {
             text = "닫기"
@@ -88,6 +155,7 @@ class CameraActivity : AppCompatActivity() {
         })
 
         setContentView(root)
+        setupGestures()
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera()
@@ -106,7 +174,8 @@ class CameraActivity : AppCompatActivity() {
                 .build()
             try {
                 provider.unbindAll()
-                provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, p, ic)
+                camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, p, ic)
+                camera!!.cameraInfo.zoomState.observe(this) { z -> zoomText.text = "%.1fx".format(z.zoomRatio) }
                 capture = ic
             } catch (e: Exception) {
                 Toast.makeText(this, "카메라를 열 수 없습니다", Toast.LENGTH_SHORT).show()
@@ -144,12 +213,85 @@ class CameraActivity : AppCompatActivity() {
             override fun onImageSaved(r: ImageCapture.OutputFileResults) {
                 count++
                 countText.text = "${count}장 저장"
+                r.savedUri?.let { afterSaved(it) }
             }
 
             override fun onError(e: ImageCaptureException) {
                 Toast.makeText(this@CameraActivity, "저장 실패: ${e.message}", Toast.LENGTH_SHORT).show()
             }
         })
+    }
+
+    private fun updateCopyBtn() {
+        copyBtn.text = if (copyOn) "복사 켬" else "복사 끔"
+        copyBtn.alpha = if (copyOn) 1f else 0.6f
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun setupGestures() {
+        val scale = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScale(d: ScaleGestureDetector): Boolean {
+                val cam = camera ?: return true
+                val cur = cam.cameraInfo.zoomState.value?.zoomRatio ?: 1f
+                cam.cameraControl.setZoomRatio(cur * d.scaleFactor)
+                return true
+            }
+        })
+        val tap = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                focusAt(e.x, e.y)
+                return true
+            }
+            override fun onDoubleTap(e: MotionEvent): Boolean {
+                camera?.cameraControl?.setZoomRatio(1f)
+                return true
+            }
+        })
+        preview.setOnTouchListener { _, e ->
+            scale.onTouchEvent(e)
+            if (!scale.isInProgress) tap.onTouchEvent(e)
+            true
+        }
+    }
+
+    private fun focusAt(x: Float, y: Float) {
+        val cam = camera ?: return
+        val pt = preview.meteringPointFactory.createPoint(x, y)
+        val action = FocusMeteringAction.Builder(pt, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
+            .setAutoCancelDuration(5, TimeUnit.SECONDS).build()
+        cam.cameraControl.startFocusAndMetering(action)
+        val half = dp(32)
+        focusBox.translationX = x - half
+        focusBox.translationY = y - half
+        focusBox.animate().cancel()
+        focusBox.alpha = 1f
+        focusBox.animate().alpha(0f).setStartDelay(700).setDuration(300).start()
+    }
+
+    /** 저장된 사진을 미리보기에 띄우고, 켜져 있으면 클립보드에도 복사 */
+    private fun afterSaved(uri: Uri) {
+        Thread {
+            try {
+                val dir = File(cacheDir, "clip").apply { mkdirs() }
+                dir.listFiles()?.forEach { it.delete() }
+                val f = File(dir, "photo_${System.currentTimeMillis()}.jpg")
+                contentResolver.openInputStream(uri)?.use { i -> f.outputStream().use { i.copyTo(it) } }
+                val o = BitmapFactory.Options().apply { inSampleSize = 16 }
+                val bmp = BitmapFactory.decodeFile(f.path, o)
+                runOnUiThread {
+                    lastClip = f
+                    thumb.setImageBitmap(bmp)
+                    thumb.visibility = View.VISIBLE
+                    if (copyOn) copyToClipboard(f)
+                }
+            } catch (e: Exception) { }
+        }.start()
+    }
+
+    private fun copyToClipboard(f: File) {
+        val u = FileProvider.getUriForFile(this, "$packageName.files", f)
+        val cm = getSystemService(ClipboardManager::class.java)
+        cm.setPrimaryClip(ClipData.newUri(contentResolver, "사진", u))
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
