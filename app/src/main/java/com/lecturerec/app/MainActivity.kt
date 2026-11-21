@@ -276,12 +276,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        menu.add(0, 3, 0, "사진").setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
         menu.add(0, 2, 0, "카메라").setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
         menu.add(0, 1, 1, "설정").setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
         return true
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        if (item.itemId == 3) {
+            startActivity(Intent(this, PhotosActivity::class.java))
+            return true
+        }
         if (item.itemId == 2) {
             startActivity(Intent(this, CameraActivity::class.java))
             return true

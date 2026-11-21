@@ -8,6 +8,7 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
@@ -48,6 +49,9 @@
             android:name=".CameraActivity"
             android:exported="false"
             android:screenOrientation="fullUser" />
+
+        <activity android:name=".PhotosActivity" android:exported="false" />
+        <activity android:name=".PhotoViewActivity" android:exported="false" />
 
         <activity
             android:name=".DetailActivity"

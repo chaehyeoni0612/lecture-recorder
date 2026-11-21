@@ -115,15 +115,34 @@ class CameraActivity : AppCompatActivity() {
         thumb = ImageView(this).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
             setBackgroundColor(Color.DKGRAY)
-            visibility = View.INVISIBLE
-            setOnClickListener {
-                lastClip?.let { copyToClipboard(it) }
-                Toast.makeText(this@CameraActivity, "클립보드에 복사함", Toast.LENGTH_SHORT).show()
+            setOnClickListener { startActivity(android.content.Intent(this@CameraActivity, PhotosActivity::class.java)) }
+            setOnLongClickListener {
+                lastClip?.let {
+                    copyToClipboard(it)
+                    Toast.makeText(this@CameraActivity, "클립보드에 복사함", Toast.LENGTH_SHORT).show()
+                }
+                true
             }
         }
         root.addView(thumb, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.BOTTOM or Gravity.START).apply {
             bottomMargin = dp(50)
             marginStart = dp(28)
+        })
+
+        val scanBtn = TextView(this).apply {
+            text = "스캔"
+            textSize = 15f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            background = GradientDrawable().apply {
+                cornerRadius = dp(28).toFloat()
+                setStroke(dp(2), Color.WHITE)
+            }
+            setOnClickListener { startScan() }
+        }
+        root.addView(scanBtn, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.BOTTOM or Gravity.END).apply {
+            bottomMargin = dp(50)
+            marginEnd = dp(28)
         })
 
         val back = TextView(this).apply {
@@ -184,16 +203,38 @@ class CameraActivity : AppCompatActivity() {
         }, ContextCompat.getMainExecutor(this))
     }
 
-    private fun fileName(): String {
-        val now = LocalDateTime.now()
-        val rec = RecordService.currentBase
-        val subject = (if (rec != null) SyncStore.subjectOf(rec) else null)
-            ?: Prefs.defaultSubject(this) ?: "강의"
-        val p = Store.periodOf(now)
-        return subject.replace(Regex("""[\\/:*?"<>|]"""), "") + "_" +
-            now.format(DateTimeFormatter.ofPattern("yyMMdd")) + "_" +
-            (if (p > 0) "${p}교시_" else "") +
-            now.format(DateTimeFormatter.ofPattern("HHmmss"))
+    private fun fileName(): String = Photos.newName(this)
+
+    private val scanLauncher = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.StartIntentSenderForResult()) { r ->
+        if (r.resultCode != RESULT_OK) return@registerForActivityResult
+        val res = com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult.fromActivityResultIntent(r.data) ?: return@registerForActivityResult
+        val pages = res.pages ?: return@registerForActivityResult
+        Thread {
+            val base = Photos.newName(this, "_스캔")
+            var last: Uri? = null
+            for ((i, pg) in pages.withIndex()) {
+                val name = if (pages.size > 1) "${base}${i + 1}" else base
+                last = Photos.saveFrom(this, pg.imageUri, name) ?: last
+            }
+            runOnUiThread {
+                count += pages.size
+                countText.text = "${count}장 저장"
+                last?.let { afterSaved(it) }
+            }
+        }.start()
+    }
+
+    private fun startScan() {
+        val opts = com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions.Builder()
+            .setGalleryImportAllowed(true)
+            .setPageLimit(20)
+            .setResultFormats(com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions.RESULT_FORMAT_JPEG)
+            .setScannerMode(com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions.SCANNER_MODE_FULL)
+            .build()
+        com.google.mlkit.vision.documentscanner.GmsDocumentScanning.getClient(opts)
+            .getStartScanIntent(this)
+            .addOnSuccessListener { scanLauncher.launch(androidx.activity.result.IntentSenderRequest.Builder(it).build()) }
+            .addOnFailureListener { Toast.makeText(this, "스캐너를 열 수 없습니다: ${it.message}", Toast.LENGTH_LONG).show() }
     }
 
     private fun take() {
